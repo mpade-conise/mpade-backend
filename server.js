@@ -1,8 +1,17 @@
 const express = require('express');
 const app = express();
 const http = require('http').createServer(app);
+
+// Initialize Socket.io with explicit CORS configuration for your Vercel client
 const io = require('socket.io')(http, {
-  cors: { origin: "*" } 
+  cors: {
+    origin: [
+      "https://progress-lake.vercel.app", // Your live Vercel production deployment
+      "http://localhost:5173"              // Your local Vite development server
+    ],
+    methods: ["GET", "POST"],
+    credentials: true
+  }
 });
 
 // A quick health-check route to help wake up or ping the Render container manually
@@ -15,6 +24,7 @@ io.on('connection', (socket) => {
   
   // Guard clause for malformed connection handshakes
   if (!room) {
+    console.log(`⚠️ Connection blocked: Missing room parameter for socket ${socket.id}`);
     socket.disconnect();
     return;
   }
@@ -24,15 +34,19 @@ io.on('connection', (socket) => {
 
   // Helper function to broadcast updated room presence lists to the host dashboard
   const broadcastRoomPresence = async (roomName) => {
-    // Fetch all active sockets currently occupying this room cluster
-    const sockets = await io.in(roomName).fetchSockets();
-    // Filter out only the viewers to construct a clean participant array
-    const viewersList = sockets
-      .filter(s => s.handshake.query.role === 'viewer' || s.handshake.query.role === 'signal-viewer')
-      .map(s => ({ socketId: s.id, username: s.handshake.query.username || 'Anonymous' }));
-    
-    // Broadcast the updated collection down to everyone in the room
-    io.to(roomName).emit('room_presence_update', viewersList);
+    try {
+      // Fetch all active sockets currently occupying this room cluster
+      const sockets = await io.in(roomName).fetchSockets();
+      // Filter out only the viewers to construct a clean participant array
+      const viewersList = sockets
+        .filter(s => s.handshake.query.role === 'viewer' || s.handshake.query.role === 'signal-viewer')
+        .map(s => ({ socketId: s.id, username: s.handshake.query.username || 'Anonymous' }));
+      
+      // Broadcast the updated collection down to everyone in the room
+      io.to(roomName).emit('room_presence_update', viewersList);
+    } catch (err) {
+      console.error("❌ Presence tracking error:", err);
+    }
   };
 
   // 1. PRESENCE INITIALIZATION LOGIC
