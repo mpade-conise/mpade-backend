@@ -76,24 +76,27 @@ io.on('connection', (socket) => {
     socket.to(room).emit('received_reaction', data);
   });
 
-  // 3. LOW-LATENCY WEBRTC P2P SIGNALING PIPELINE
+  // 3. LOW-LATENCY WEBRTC P2P SIGNALING PIPELINE (OPTIMIZED ROUTING)
   socket.on('request_host_stream', ({ streamId }) => {
+    console.log(`📡 Forwarding explicit stream request from viewer (${socket.id}) to room channel [${streamId}]`);
     // Tell the host client that a specific viewer socket ID is ready to parse a media offer
     socket.to(streamId).emit('viewer_requesting_stream', { viewerSocketId: socket.id });
   });
 
   socket.on('send_webrtc_offer', ({ streamId, offer, targetViewerId }) => {
-    // Direct-route the host's generated SDP Offer safely to the target viewer
-    io.to(targetViewerId).emit('webrtc_offer_received', { offer });
+    console.log(`📤 Direct routing host SDP offer to target viewer socket: ${targetViewerId}`);
+    // Direct-route the host's generated SDP Offer safely to the targeted viewer connection ID
+    io.to(targetViewerId).emit('webrtc_offer_received', { offer, hostSocketId: socket.id });
   });
 
   socket.on('send_webrtc_answer', ({ streamId, answer }) => {
-    // Route the viewer's generated SDP Answer back up to the host stream room
-    socket.to(streamId).emit('webrtc_answer_received', { answer });
+    console.log(`📥 Routing viewer SDP answer response back to room channel [${streamId}]`);
+    // Route the viewer's generated SDP Answer back up to the host stream room ecosystem
+    socket.to(streamId).emit('webrtc_answer_received', { answer, viewerSocketId: socket.id });
   });
 
   socket.on('webrtc_ice_candidate', ({ streamId, candidate, senderType }) => {
-    // Relay raw network routing candidates dynamically between alternative peer nodes
+    // Relay raw network routing candidates dynamically between alternative peer nodes while bypassing the sender
     socket.to(streamId).emit('incoming_ice_candidate', { candidate, senderType });
   });
 
