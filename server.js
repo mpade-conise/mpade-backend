@@ -119,6 +119,58 @@ io.on('connection', (socket) => {
   });
 });
 
+// server.js (Append to your existing Express / Socket.io server config)
+const activeUsers = new Map(); // Tracks userId -> socketId lines maps
+
+io.on('connection', (socket) => {
+  console.log(`🔌 New client handshaking: ${socket.id}`);
+
+  // 1. Authenticate user connection and store global presence mapping
+  socket.on('user_going_online', (userId) => {
+    socket.userId = userId;
+    activeUsers.set(userId, socket.id);
+    
+    // Broadcast globally that this friend is active
+    io.emit('friend_presence_changed', { userId, status: 'online' });
+    console.log(`🟢 User ${userId} linked to session link ${socket.id}`);
+  });
+
+  // 2. Explicitly bind a client to a conversation channel room line
+  socket.on('join_chat_room', ({ roomId }) => {
+    socket.join(roomId);
+    console.log(`🎯 Session ${socket.id} joined conversation pipeline room: ${roomId}`);
+  });
+
+  // 3. Realtime message multiplexing engine
+  socket.on('send_chat_message', (messagePayload) => {
+    const { id, room_id, sender_id, content, type, created_at } = messagePayload;
+
+    // Instantly dispatch to all concurrent users listening inside that room channel
+    socket.to(room_id).emit('received_chat_message', {
+      id,
+      room_id,
+      sender_id,
+      content,
+      type,
+      created_at,
+      is_read: false
+    });
+  });
+
+  // 4. Realtime indicator event layer (Facebook style "... is typing")
+  socket.on('user_typing_state', ({ room_id, userId, isTyping }) => {
+    socket.to(room_id).emit('peer_typing_state_changed', { userId, isTyping });
+  });
+
+  // 5. Connection Teardown Handler
+  socket.on('disconnect', () => {
+    if (socket.userId) {
+      activeUsers.delete(socket.userId);
+      io.emit('friend_presence_changed', { userId: socket.userId, status: 'offline' });
+      console.log(`🔴 User ${socket.userId} went offline.`);
+    }
+  });
+});
 const PORT = process.env.PORT || 4000;
 http.listen(PORT, () => {
   console.log(`🚀 Socket signaling machine operational on port ${PORT}`);
