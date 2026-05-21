@@ -76,7 +76,7 @@ io.on('connection', (socket) => {
     socket.to(room).emit('received_reaction', data);
   });
 
-  // 3. LOW-LATENCY WEBRTC P2P SIGNALING PIPELINE (OPTIMIZED ROUTING)
+  // 3. LOW-LATENCY WEBRTC P2P SIGNALING PIPELINE (OPTIMIZED TARGET ROUTING)
   socket.on('request_host_stream', ({ streamId }) => {
     console.log(`📡 Forwarding explicit stream request from viewer (${socket.id}) to room channel [${streamId}]`);
     // Tell the host client that a specific viewer socket ID is ready to parse a media offer
@@ -95,9 +95,16 @@ io.on('connection', (socket) => {
     socket.to(streamId).emit('webrtc_answer_received', { answer, viewerSocketId: socket.id });
   });
 
-  socket.on('webrtc_ice_candidate', ({ streamId, candidate, senderType }) => {
-    // Relay raw network routing candidates dynamically between alternative peer nodes while bypassing the sender
-    socket.to(streamId).emit('incoming_ice_candidate', { candidate, senderType });
+  socket.on('webrtc_ice_candidate', ({ streamId, candidate, targetSocketId, senderType }) => {
+    // If an explicit target destination is provided, bypass the room and send it straight to that node
+    if (targetSocketId) {
+      console.log(`⚡ Direct-routing ICE Candidate from (${senderType}) straight to socket target: ${targetSocketId}`);
+      io.to(targetSocketId).emit('incoming_ice_candidate', { candidate, senderType, senderSocketId: socket.id });
+    } else {
+      // Fallback: Broadcast candidates to the room matrix, ignoring the sender socket node
+      console.log(`🗣️ Room broadcasting ICE Candidate from (${senderType}) inside channel: [${streamId}]`);
+      socket.to(streamId).emit('incoming_ice_candidate', { candidate, senderType, senderSocketId: socket.id });
+    }
   });
 
   // 4. DISCONNECT / CLEANUP LOGIC
