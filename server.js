@@ -56,27 +56,6 @@ io.on('connection', (socket) => {
     broadcastRoomPresence(room);
   }
 
-  // --- ALLIANCE MATCHMAKING SYSTEM CORES (FIXED EVENT KEYNAMES) ---
-  
-  // 1. Frontend fires send_cohost_invite -> Relay to targeted room
-  socket.on('send_cohost_invite', (data) => {
-    const destinationRoom = data.targetStreamId || data.targetRoomId;
-    console.log(`⚔️ Relaying battle invitation from ${data.senderUsername} into target stream room: [${destinationRoom}]`);
-    
-    // Broadcast cleanly to the target stream's room cluster
-    socket.to(destinationRoom).emit('battle_invite_received', {
-      senderStreamId: data.hostRoomId,
-      senderUsername: data.senderUsername,
-      senderHostId: data.senderHostId
-    });
-  });
-
-  // 2. Frontend fires accept_battle_invite -> Handshake back to the challenger
-  socket.on('accept_battle_invite', (data) => {
-    console.log(`✅ Battle invitation accepted between Host Room [${data.hostRoomId}] and Challenger Room [${data.challengerRoomId}]`);
-    socket.to(data.challengerRoomId).emit('battle_invite_accepted', data);
-  });
-
   // STREAM REACTION ENGINE
   socket.on('send_reaction', (data) => {
     if (room) socket.to(room).emit('received_reaction', data);
