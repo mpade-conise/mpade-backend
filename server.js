@@ -23,12 +23,20 @@ app.get('/', (req, res) => {
 });
 
 io.on('connection', (socket) => {
-  const { room, role } = socket.handshake.query;
+  const { room, role, streamId } = socket.handshake.query;
   
   // Guard clause for malformed connection handshakes if checking live streaming routes
   if (room) {
     socket.join(room);
     console.log(`🔌 Connection: Socket ${socket.id} joined room [${room}] as (${role})`);
+    
+    // BACKEND SEED FIX: Index host components globally using their active room stream context 
+    if (role === 'cohost_master' || role === 'host') {
+      const hostIdentifier = streamId || room;
+      activeUsers.set(hostIdentifier, socket.id);
+      socket.hostIdentifier = hostIdentifier; // Bind reference context to socket for clean disconnect trace
+      console.log(`📡 Registered Host globally in active reference index: [${hostIdentifier}] -> Socket ${socket.id}`);
+    }
   } else {
     console.log(`🔌 New client handshaking without room parameter (General Session): ${socket.id}`);
   }
@@ -56,7 +64,39 @@ io.on('connection', (socket) => {
     broadcastRoomPresence(room);
   }
 
-  // STREAM REACTION ENGINE
+  // --- CROSS-ROOM CO-HOST INVITE ROUTER DISPATCHERS ---
+  socket.on('send_cohost_invite', (data) => {
+    // data payload shape: { room, targetUserId, fromHostId, inviteFrom }
+    const targetSocketId = activeUsers.get(data.targetUserId);
+
+    if (targetSocketId) {
+      console.log(`✉️ Cross-Room Signal: Routing invitation from Room [${data.room}] directly to Target Socket ID [${targetSocketId}]`);
+      
+      // Bypasses room boundaries and targets the absolute socket channel of the invitee!
+      io.to(targetSocketId).emit('cohost_invite_received', {
+        room: data.room,               // Room ID where the request originated
+        fromHostId: data.fromHostId,   // Host string who requested the split feed
+        inviteFrom: data.inviteFrom
+      });
+    } else {
+      console.log(`⚠️ Signal Routing Aborted: Target Host ${data.targetUserId} is not active in the global session map.`);
+    }
+  });
+
+  socket.on('respond_cohost_invite', (data) => {
+    // data payload shape: { room, targetUserId, status } ('accepted' / 'declined')
+    const originHostSocketId = activeUsers.get(data.targetUserId);
+
+    if (originHostSocketId) {
+      console.log(`📥 Routing invite response status [${data.status}] back to origin room host socket: ${originHostSocketId}`);
+      io.to(originHostSocketId).emit('cohost_invite_accepted', {
+        room: data.room,
+        status: data.status
+      });
+    }
+  });
+
+  // --- STREAM REACTION ENGINE ---
   socket.on('send_reaction', (data) => {
     if (room) socket.to(room).emit('received_reaction', data);
   });
@@ -118,6 +158,12 @@ io.on('connection', (socket) => {
       if (role === 'viewer' || role === 'signal-viewer') {
         broadcastRoomPresence(room);
       }
+    }
+
+    // Clean up host entries out of the allocation map safely
+    if (socket.hostIdentifier) {
+      activeUsers.delete(socket.hostIdentifier);
+      console.log(`🛑 Removed Host mapping trace from indexing arrays: ${socket.hostIdentifier}`);
     }
 
     if (socket.userId) {
