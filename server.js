@@ -2,7 +2,7 @@ const express = require('express');
 const app = express();
 const http = require('http').createServer(app);
 
-// Initialize Socket.io with explicit CORS configuration for your Vercel client
+// Initialize Socket.io with explicit CORS configuration for your frontend deployments
 const io = require('socket.io')(http, {
   cors: {
     origin: [
@@ -72,6 +72,24 @@ io.on('connection', (socket) => {
     console.log(`🟢 User ${userId} bound to notification session map: ${socket.id}`);
   });
 
+  // --- EXTENDED CHAT REAL-TIME CALL SIGNALING MAPPER ---
+  socket.on('initiate_call_signal', (callPayload) => {
+    // Expected payload shape: { receiverId, callerId, callerName, callType }
+    const targetSocketId = activeUsers.get(callPayload.receiverId);
+    if (targetSocketId) {
+      console.log(`📞 Routing direct incoming ${callPayload.callType} call signal to target client: ${targetSocketId}`);
+      io.to(targetSocketId).emit('incoming_call_signal', callPayload);
+    }
+  });
+
+  socket.on('decline_call', ({ callerId }) => {
+    const originCallerSocketId = activeUsers.get(callerId);
+    if (originCallerSocketId) {
+      console.log(`🚫 Call declined by receiver. Notifying origin socket: ${originCallerSocketId}`);
+      io.to(originCallerSocketId).emit('call_cancelled_by_caller');
+    }
+  });
+
   socket.on('join_call_room', ({ roomId, userId }) => {
     socket.join(roomId);
     console.log(`📞 Socket ${socket.id} joined dedicated P2P WebRTC call room: ${roomId}`);
@@ -84,7 +102,7 @@ io.on('connection', (socket) => {
     if (targetSocketId) {
       console.log(`🔔 Forwarding real-time incoming call alert from ${userId} to target socket ${targetSocketId}`);
       io.to(targetSocketId).emit('incoming_call_signal', {
-        fromUserId: userId,
+        callerId: userId,
         roomId: roomId
       });
     }
@@ -100,16 +118,12 @@ io.on('connection', (socket) => {
 
   // --- CROSS-ROOM CO-HOST INVITE ROUTER DISPATCHERS ---
   socket.on('send_cohost_invite', (data) => {
-    // data payload shape: { room, targetUserId, fromHostId, inviteFrom }
     const targetSocketId = activeUsers.get(data.targetUserId);
-
     if (targetSocketId) {
       console.log(`✉️ Cross-Room Signal: Routing invitation from Room [${data.room}] directly to Target Socket ID [${targetSocketId}]`);
-      
-      // Bypasses room boundaries and targets the absolute socket channel of the invitee!
       io.to(targetSocketId).emit('cohost_invite_received', {
-        room: data.room,               // Room ID where the request originated
-        fromHostId: data.fromHostId,   // Host string who requested the split feed
+        room: data.room,
+        fromHostId: data.fromHostId,
         inviteFrom: data.inviteFrom
       });
     } else {
@@ -118,9 +132,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('respond_cohost_invite', (data) => {
-    // data payload shape: { room, targetUserId, status } ('accepted' / 'declined')
     const originHostSocketId = activeUsers.get(data.targetUserId);
-
     if (originHostSocketId) {
       console.log(`📥 Routing invite response status [${data.status}] back to origin room host socket: ${originHostSocketId}`);
       io.to(originHostSocketId).emit('cohost_invite_accepted', {
@@ -167,20 +179,24 @@ io.on('connection', (socket) => {
     console.log(`🟢 User ${userId} linked to live session: ${socket.id}`);
   });
 
-  socket.on('join_chat_room', ({ roomId }) => {
-    socket.join(roomId);
-    console.log(`🎯 Session ${socket.id} joined conversation pipeline room: ${roomId}`);
-  });
-
   socket.on('send_chat_message', (messagePayload) => {
-    const { id, room_id, sender_id, content, type, created_at } = messagePayload;
-    socket.to(room_id).emit('received_chat_message', {
-      id, room_id, sender_id, content, type, created_at, is_read: false
-    });
+    // Extract recipient's session out of active routing pool to target delivery 
+    const targetSocketId = activeUsers.get(messagePayload.receiver_id);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('received_chat_message', messagePayload);
+    }
   });
 
-  socket.on('user_typing_state', ({ room_id, userId, isTyping }) => {
-    socket.to(room_id).emit('peer_typing_state_changed', { userId, isTyping });
+  socket.on('broadcast_message_update', (updatedPayload) => {
+    const targetSocketId = activeUsers.get(updatedPayload.receiver_id);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('message_updated_realtime', updatedPayload);
+    }
+  });
+
+  socket.on('user_typing_state', ({ userId, isTyping, mode }) => {
+    // Dynamic broad notification update for tracking status changes across conversation views
+    socket.broadcast.emit('peer_typing_state_changed', { userId, isTyping, mode });
   });
 
   // DISCONNECT / CLEANUP LOGIC
