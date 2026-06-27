@@ -90,21 +90,31 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('join_call_room', ({ roomId, userId }) => {
+  // FIXED: Supports explicit targetPeerId to handle complex hyphenated UUID room names safely
+  socket.on('join_call_room', ({ roomId, userId, targetPeerId }) => {
     socket.join(roomId);
     console.log(`📞 Socket ${socket.id} joined dedicated P2P WebRTC call room: ${roomId}`);
     
-    // Extract target peer from composite room signature (e.g., "userA-userB")
-    const userIds = roomId.split("-");
-    const peerUserId = userIds.find(id => id !== userId);
-    const targetSocketId = activeUsers.get(peerUserId);
+    // Explicit targeting avoids buggy splitting loops when UUIDs contain internal hyphens
+    let peerUserId = targetPeerId;
+    
+    if (!peerUserId) {
+      const userIds = roomId.split("-");
+      // Fallback fallback if only standard text strings are utilized
+      peerUserId = userIds.find(id => id !== userId);
+    }
 
-    if (targetSocketId) {
-      console.log(`🔔 Forwarding real-time incoming call alert from ${userId} to target socket ${targetSocketId}`);
-      io.to(targetSocketId).emit('incoming_call_signal', {
-        callerId: userId,
-        roomId: roomId
-      });
+    if (peerUserId) {
+      const targetSocketId = activeUsers.get(peerUserId);
+      if (targetSocketId) {
+        console.log(`🔔 Forwarding real-time incoming call alert from ${userId} to target socket ${targetSocketId}`);
+        io.to(targetSocketId).emit('incoming_call_signal', {
+          callerId: userId,
+          roomId: roomId
+        });
+      } else {
+        console.log(`📡 Target peer registration status lookup failed for: ${peerUserId}`);
+      }
     }
   });
 
@@ -180,7 +190,6 @@ io.on('connection', (socket) => {
   });
 
   socket.on('send_chat_message', (messagePayload) => {
-    // Extract recipient's session out of active routing pool to target delivery 
     const targetSocketId = activeUsers.get(messagePayload.receiver_id);
     if (targetSocketId) {
       io.to(targetSocketId).emit('received_chat_message', messagePayload);
@@ -195,7 +204,6 @@ io.on('connection', (socket) => {
   });
 
   socket.on('user_typing_state', ({ userId, isTyping, mode }) => {
-    // Dynamic broad notification update for tracking status changes across conversation views
     socket.broadcast.emit('peer_typing_state_changed', { userId, isTyping, mode });
   });
 
@@ -210,7 +218,6 @@ io.on('connection', (socket) => {
       }
     }
 
-    // Clean up host entries out of the allocation map safely
     if (socket.hostIdentifier) {
       activeUsers.delete(socket.hostIdentifier);
       console.log(`🛑 Removed Host mapping trace from indexing arrays: ${socket.hostIdentifier}`);
