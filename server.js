@@ -64,6 +64,40 @@ io.on('connection', (socket) => {
     broadcastRoomPresence(room);
   }
 
+  // --- PASSIVE CALL SESSION & APP LAYER SIGNALING HOOKS ---
+  socket.on('register_user_session', ({ userId }) => {
+    socket.userId = userId;
+    activeUsers.set(userId, socket.id);
+    io.emit('friend_presence_changed', { userId, status: 'online' });
+    console.log(`🟢 User ${userId} bound to notification session map: ${socket.id}`);
+  });
+
+  socket.on('join_call_room', ({ roomId, userId }) => {
+    socket.join(roomId);
+    console.log(`📞 Socket ${socket.id} joined dedicated P2P WebRTC call room: ${roomId}`);
+    
+    // Extract target peer from composite room signature (e.g., "userA-userB")
+    const userIds = roomId.split("-");
+    const peerUserId = userIds.find(id => id !== userId);
+    const targetSocketId = activeUsers.get(peerUserId);
+
+    if (targetSocketId) {
+      console.log(`🔔 Forwarding real-time incoming call alert from ${userId} to target socket ${targetSocketId}`);
+      io.to(targetSocketId).emit('incoming_call_signal', {
+        fromUserId: userId,
+        roomId: roomId
+      });
+    }
+  });
+
+  socket.on('reject_incoming_call', ({ roomId, to }) => {
+    const targetSocketId = activeUsers.get(to);
+    if (targetSocketId) {
+      console.log(`🚫 Call rejected by peer. Notifying origin socket: ${targetSocketId}`);
+      io.to(targetSocketId).emit('peer_hung_up');
+    }
+  });
+
   // --- CROSS-ROOM CO-HOST INVITE ROUTER DISPATCHERS ---
   socket.on('send_cohost_invite', (data) => {
     // data payload shape: { room, targetUserId, fromHostId, inviteFrom }
