@@ -95,12 +95,15 @@ io.on('connection', (socket) => {
     socket.join(roomId);
     console.log(`📞 Socket ${socket.id} joined dedicated P2P WebRTC call room: ${roomId}`);
     
-    // Explicit targeting avoids buggy splitting loops when UUIDs contain internal hyphens
+    // Bind session parameters on fallback if the client is registering via direct call screen
+    if (userId && !socket.userId) {
+      socket.userId = userId;
+      activeUsers.set(userId, socket.id);
+    }
+
     let peerUserId = targetPeerId;
-    
     if (!peerUserId) {
       const userIds = roomId.split("-");
-      // Fallback fallback if only standard text strings are utilized
       peerUserId = userIds.find(id => id !== userId);
     }
 
@@ -157,29 +160,72 @@ io.on('connection', (socket) => {
     if (room) socket.to(room).emit('received_reaction', data);
   });
 
-  // --- LOW-LATENCY WEBRTC P2P SIGNALING PIPELINE ---
+  // --- LOW-LATENCY WEBRTC P2P SIGNALING PIPELINE (HYBRID AUDIO/VIDEO ROUTING) ---
   socket.on('request_host_stream', ({ streamId }) => {
     console.log(`📡 Forwarding explicit stream request from viewer (${socket.id}) to room channel [${streamId}]`);
     socket.to(streamId).emit('viewer_requesting_stream', { viewerSocketId: socket.id });
   });
 
-  socket.on('send_webrtc_offer', ({ streamId, offer, targetViewerId }) => {
-    console.log(`📤 Direct routing host SDP offer to target viewer socket: ${targetViewerId}`);
-    io.to(targetViewerId).emit('webrtc_offer_received', { offer, hostSocketId: socket.id });
-  });
-
-  socket.on('send_webrtc_answer', ({ streamId, answer }) => {
-    console.log(`📥 Routing viewer SDP answer response back to room channel [${streamId}]`);
-    socket.to(streamId).emit('webrtc_answer_received', { answer, viewerSocketId: socket.id });
-  });
-
-  socket.on('webrtc_ice_candidate', ({ streamId, candidate, targetSocketId, senderType }) => {
-    if (targetSocketId) {
-      io.to(targetSocketId).emit('incoming_ice_candidate', { candidate, senderType, senderSocketId: socket.id });
+  socket.on('send_webrtc_offer', (data) => {
+    const { streamId, roomId, offer, targetViewerId, to } = data;
+    const targetId = targetViewerId || to;
+    
+    // Smart P2P Lookup: Check if targetId matches an active logged-in User Session ID first
+    const directUserSocket = activeUsers.get(targetId);
+    
+    if (directUserSocket) {
+      console.log(`📤 Private Route: Forwarding WebRTC offer direct to Peer Socket: ${directUserSocket}`);
+      io.to(directUserSocket).emit('webrtc_offer_received', { offer, hostSocketId: socket.id });
+      io.to(directUserSocket).emit('webrtc_offer', { offer, hostSocketId: socket.id });
+    } else if (targetId) {
+      console.log(`📤 Stream Route: Direct routing host SDP offer to target viewer socket identifier: ${targetId}`);
+      io.to(targetId).emit('webrtc_offer_received', { offer, hostSocketId: socket.id });
     } else {
-      socket.to(streamId).emit('incoming_ice_candidate', { candidate, senderType, senderSocketId: socket.id });
+      const activeRoom = roomId || streamId;
+      console.log(`📤 Room Broadcast Route: Transmitting offer out to channel: ${activeRoom}`);
+      socket.to(activeRoom).emit('webrtc_offer_received', { offer, hostSocketId: socket.id });
     }
   });
+
+  socket.on('send_webrtc_answer', (data) => {
+    const { streamId, roomId, answer, to } = data;
+    
+    const directUserSocket = activeUsers.get(to);
+    if (directUserSocket) {
+      console.log(`📥 Private Route: Forwarding WebRTC answer direct to Peer Socket: ${directUserSocket}`);
+      io.to(directUserSocket).emit('webrtc_answer_received', { answer, viewerSocketId: socket.id });
+      io.to(directUserSocket).emit('webrtc_answer', { answer, viewerSocketId: socket.id });
+    } else {
+      const activeRoom = streamId || roomId;
+      console.log(`📥 Room Route: Routing WebRTC answer back to channel room context [${activeRoom}]`);
+      socket.to(activeRoom).emit('webrtc_answer_received', { answer, viewerSocketId: socket.id });
+      socket.to(activeRoom).emit('webrtc_answer', { answer, viewerSocketId: socket.id });
+    }
+  });
+
+  socket.on('webrtc_ice_candidate', (data) => {
+    const { streamId, roomId, candidate, targetSocketId, to, senderType } = data;
+    const destinationUser = to;
+    
+    const directUserSocket = activeUsers.get(destinationUser);
+    const targetId = targetSocketId || directUserSocket;
+    
+    if (targetId) {
+      console.log(`🧊 Targeted Route: Shipping ICE Candidate directly to target socket instance: ${targetId}`);
+      io.to(targetId).emit('incoming_ice_candidate', { candidate, senderType, senderSocketId: socket.id });
+      io.to(targetId).emit('webrtc_ice_candidate', { candidate, senderType, senderSocketId: socket.id });
+    } else {
+      const activeRoom = streamId || roomId;
+      console.log(`🧊 Room Broadcast Route: Distributing candidate across room channels: ${activeRoom}`);
+      socket.to(activeRoom).emit('incoming_ice_candidate', { candidate, senderType, senderSocketId: socket.id });
+      socket.to(activeRoom).emit('webrtc_ice_candidate', { candidate, senderType, senderSocketId: socket.id });
+    }
+  });
+
+  // Legacy events alias alignment mappings
+  socket.on('webrtc_offer', (data) => socket.emit('send_webrtc_offer', data));
+  socket.on('webrtc_answer', (data) => socket.emit('send_webrtc_answer', data));
+  socket.on('send_ice_candidate', (data) => socket.emit('webrtc_ice_candidate', data));
 
   // --- GLOBAL MESSAGING & FRIEND PRESENCE CORES ---
   socket.on('user_going_online', (userId) => {
