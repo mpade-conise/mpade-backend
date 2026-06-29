@@ -4,6 +4,7 @@ const app = express();
 const http = require('http').createServer(app);
 const path = require('path');
 const fs = require('fs'); // Required for clean-up operations
+const os = require('os'); // 🌟 NEW: Required for cross-platform secure temporary directory resolution
 
 // 2. Enable global CORS middleware explicitly for Express HTTP router pathways
 app.use(cors({
@@ -53,9 +54,9 @@ app.post('/api/merge-video', async (req, res) => {
     return res.status(400).json({ error: "Missing source videoUrl field." });
   }
 
-  // Create a unique temporary filename on the hosting container disk environment
+  // Create a unique temporary filename dynamically resolved by the host OS environment
   const outputFilename = `merged_${Date.now()}_${Math.floor(Math.random() * 1000)}.mp4`;
-  const outputPath = path.join('/tmp', outputFilename);
+  const outputPath = path.join(os.tmpdir(), outputFilename); // 🌟 Uses system assigned temp folder securely
 
   // Executes native backend processing by processing to a physical temporary file first
   ffmpeg()
@@ -78,7 +79,7 @@ app.post('/api/merge-video', async (req, res) => {
     .on('error', (err) => {
       console.error('❌ Server-Side Video Processing Pipeline Error:', err.message);
       if (!res.headersSent) {
-        res.status(500).send('Video generation pipeline encountered an issue.');
+        res.status(500).send(`Video generation pipeline encountered an issue: ${err.message}`);
       }
       // Clean up the temporary file if it was partially written
       if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
