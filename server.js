@@ -2,6 +2,16 @@ const express = require('express');
 const app = express();
 const http = require('http').createServer(app);
 
+// 1. Import the static binary installer and core fluent-ffmpeg package
+const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
+const ffmpeg = require('fluent-ffmpeg');
+
+// 2. Map the local installer binary pathway directly into your tool configurations
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+
+// Add Express JSON parsing middleware for the inbound download request body
+app.use(express.json());
+
 // Initialize Socket.io with explicit CORS configuration for your frontend deployments
 const io = require('socket.io')(http, {
   cors: {
@@ -20,6 +30,39 @@ const activeUsers = new Map();
 // A quick health-check route to help wake up or ping the Render container manually
 app.get('/', (req, res) => {
   res.send('🚀 Mpade Socket Core Signaling Machine Operational');
+});
+
+// --- NEW STABLE VIDEO/AUDIO STREAM MERGE ENDPOINT ---
+app.post('/api/merge-video', async (req, res) => {
+  const { videoUrl, audioUrl } = req.body;
+
+  if (!videoUrl) {
+    return res.status(400).json({ error: "Missing source videoUrl field." });
+  }
+
+  // Set the response headers to stream an inline file directly to the client's browser download pipeline
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Content-Disposition', 'attachment; filename="Mpade_Export.mp4"');
+
+  // Executes native backend processing using the host environment's system tools
+  ffmpeg()
+    .input(videoUrl)
+    .input(audioUrl || '/sounds/default_audio.mp3') // Fallback if no audio asset specified
+    .outputOptions([
+      '-c:v copy',    // Copy video frames directly without expensive re-encoding
+      '-c:a aac',     // Encode audio stream to standard AAC format
+      '-map 0:v:0',   // Map the first input's raw video layer
+      '-map 1:a:0',   // Map the second input's raw audio layer
+      '-shortest'     // Constrain total length to match whichever file finishes first
+    ])
+    .toFormat('mp4')
+    .on('error', (err) => {
+      console.error('❌ Server-Side Video Processing Pipeline Error:', err.message);
+      if (!res.headersSent) {
+        res.status(500).send('Video generation pipeline encountered an issue.');
+      }
+    })
+    .pipe(res, { end: true }); // Automatically pipe the resulting output buffer back to the client
 });
 
 io.on('connection', (socket) => {
