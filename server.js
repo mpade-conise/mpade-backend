@@ -59,6 +59,9 @@ app.post('/api/merge-video', async (req, res) => {
   ffmpeg()
     .input(videoUrl)
     .input(audioUrl || '/sounds/default_audio.mp3') // Fallback if no audio asset specified
+    .inputOptions([
+      '-protocol_whitelist file,http,https,tcp,tls,crypto' // 🌟 Whitelist network protocols for remote resource streaming
+    ])
     .outputOptions([
       '-c:v copy',    // Copy video frames directly without expensive re-encoding
       '-c:a aac',     // Encode audio stream to standard AAC format
