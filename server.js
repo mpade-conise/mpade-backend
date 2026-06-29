@@ -2,9 +2,6 @@ const express = require('express');
 const cors = require('cors'); // 1. Import the cors package
 const app = express();
 const http = require('http').createServer(app);
-const path = require('path');
-const fs = require('fs'); // Required for clean-up operations
-const os = require('os'); // 🌟 NEW: Required for cross-platform secure temporary directory resolution
 
 // 2. Enable global CORS middleware explicitly for Express HTTP router pathways
 app.use(cors({
@@ -54,16 +51,16 @@ app.post('/api/merge-video', async (req, res) => {
     return res.status(400).json({ error: "Missing source videoUrl field." });
   }
 
-  // Create a unique temporary filename dynamically resolved by the host OS environment
-  const outputFilename = `merged_${Date.now()}_${Math.floor(Math.random() * 1000)}.mp4`;
-  const outputPath = path.join(os.tmpdir(), outputFilename); // 🌟 Uses system assigned temp folder securely
+  // Set the response headers to stream an inline file directly to the client's browser download pipeline
+  res.setHeader('Content-Type', 'video/mp4');
+  res.setHeader('Content-Disposition', 'attachment; filename="Mpade_Export.mp4"');
 
-  // Executes native backend processing by processing to a physical temporary file first
+  // Executes native backend processing using the host environment's system tools
   ffmpeg()
     .input(videoUrl)
-    .input(audioUrl || '/sounds/default_audio.mp3') 
+    .input(audioUrl || '/sounds/default_audio.mp3') // Fallback if no audio asset specified
     .inputOptions([
-      '-protocol_whitelist file,http,https,tcp,tls,crypto'
+      '-protocol_whitelist file,http,https,tcp,tls,crypto' // 🌟 Whitelist network protocols for remote resource streaming
     ])
     .outputOptions([
       '-c:v copy',    // Copy video frames directly without expensive re-encoding
@@ -73,33 +70,13 @@ app.post('/api/merge-video', async (req, res) => {
       '-shortest'     // Constrain total length to match whichever file finishes first
     ])
     .toFormat('mp4')
-    .on('start', (cmd) => {
-      console.log('🎬 Started Video Pipeline Processing to Disk...');
-    })
     .on('error', (err) => {
       console.error('❌ Server-Side Video Processing Pipeline Error:', err.message);
       if (!res.headersSent) {
-        res.status(500).send(`Video generation pipeline encountered an issue: ${err.message}`);
+        res.status(500).send('Video generation pipeline encountered an issue.');
       }
-      // Clean up the temporary file if it was partially written
-      if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
     })
-    .on('end', () => {
-      console.log('✅ Video successfully generated on disk. Initializing download pipeline transfer...');
-      
-      // Send the completed file safely as an attachment download
-      res.download(outputPath, 'Mpade_Export.mp4', (downloadErr) => {
-        if (downloadErr) {
-          console.error('❌ Error during transmission file transfer:', downloadErr);
-        }
-        // Always delete the file from the server after transfer finishes to preserve space
-        if (fs.existsSync(outputPath)) {
-          fs.unlinkSync(outputPath);
-          console.log('🗑️ Cleaned up temporary processing file from disk.');
-        }
-      });
-    })
-    .save(outputPath); // Save natively to disk instead of direct pipeline piping
+    .pipe(res, { end: true }); // Automatically pipe the resulting output buffer back to the client
 });
 
 io.on('connection', (socket) => {
