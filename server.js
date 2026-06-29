@@ -1,12 +1,23 @@
 const express = require('express');
+const cors = require('cors'); // 1. Import the cors package
 const app = express();
 const http = require('http').createServer(app);
 
-// 1. Import the static binary installer and core fluent-ffmpeg package
+// 2. Enable global CORS middleware explicitly for Express HTTP router pathways
+app.use(cors({
+  origin: [
+    "https://progress-lake.vercel.app", // Your live Vercel production deployment
+    "http://localhost:5173"              // Your local Vite development server
+  ],
+  methods: ["GET", "POST"],
+  credentials: true
+}));
+
+// 3. Import the static binary installer and core fluent-ffmpeg package
 const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
 const ffmpeg = require('fluent-ffmpeg');
 
-// 2. Map the local installer binary pathway directly into your tool configurations
+// 4. Map the local installer binary pathway directly into your tool configurations
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 // Add Express JSON parsing middleware for the inbound download request body
