@@ -7,38 +7,26 @@ const fs = require('fs'); // Required for clean-up and permission validation
 const os = require('os'); // Required for securing platform-independent temp folders
 
 // 2. Enable global CORS middleware explicitly for Express HTTP router pathways
+// Updated to support automatic handling of preflight OPTIONS requests cleanly
 app.use(cors({
   origin: [
     "https://progress-lake.vercel.app", // Your live Vercel production deployment
     "http://localhost:5173"              // Your local Vite development server
   ],
-  methods: ["GET", "POST"],
+  methods: ["GET", "POST", "OPTIONS"],
   credentials: true
 }));
 
-// 3. Import the static binary installer and core fluent-ffmpeg package
-const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
+// 3. Import the core fluent-ffmpeg package
 const ffmpeg = require('fluent-ffmpeg');
 
-// 4. Map the local installer binary pathway directly into your tool configurations
-try {
-  const binaryPath = ffmpegInstaller.path;
-  
-  // Explicitly grant execution permissions if running inside Linux/Render environments
-  if (process.platform !== 'win32' && fs.existsSync(binaryPath)) {
-    try {
-      fs.chmodSync(binaryPath, '755'); 
-      console.log('🔓 Executable permissions successfully granted to FFmpeg binary.');
-    } catch (permErr) {
-      console.warn('⚠️ Warning: Could not explicitly set permissions on installer binary:', permErr.message);
-    }
-  }
-
-  ffmpeg.setFfmpegPath(binaryPath);
-  console.log(`🚀 FFmpeg path successfully mapped to: ${binaryPath}`);
-} catch (err) {
-  console.error('❌ Failed initializing installer binary path, checking system fallback...', err.message);
-  ffmpeg.setFfmpegPath('/usr/bin/ffmpeg'); 
+// 4. Fall back seamlessly to Render's stable system-level binary path
+const systemFfmpegPath = '/usr/bin/ffmpeg';
+if (fs.existsSync(systemFfmpegPath)) {
+  ffmpeg.setFfmpegPath(systemFfmpegPath);
+  console.log(`🚀 FFmpeg path successfully mapped to system production binary: ${systemFfmpegPath}`);
+} else {
+  console.log('ℹ️ Local environment detected or custom package path applied.');
 }
 
 // Add Express JSON parsing middleware for the inbound download request body
@@ -100,7 +88,7 @@ app.post('/api/merge-video', async (req, res) => {
     .on('error', (err) => {
       console.error('❌ Server-Side Video Processing Pipeline Error:', err.message);
       if (!res.headersSent) {
-        res.status(500).send(`Video generation pipeline encountered an issue: ${err.message}`);
+        res.status(500).json({ error: `Video generation pipeline encountered an issue: ${err.message}` });
       }
       if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
     })
