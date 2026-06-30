@@ -52,7 +52,7 @@ app.get('/', (req, res) => {
   res.send('🚀 Mpade Socket Core Signaling Machine Operational');
 });
 
-// --- NEW STABLE VIDEO/AUDIO STREAM MERGE ENDPOINT ---
+// --- UPDATED STABLE VIDEO/AUDIO STREAM MERGE ENDPOINT ---
 app.post('/api/merge-video', async (req, res) => {
   const { videoUrl, audioUrl } = req.body;
 
@@ -64,22 +64,30 @@ app.post('/api/merge-video', async (req, res) => {
   const outputFilename = `merged_${Date.now()}_${Math.floor(Math.random() * 1000)}.mp4`;
   const outputPath = path.join(os.tmpdir(), outputFilename);
 
+  // Dynamic Bucket Fallback Link: Points directly to your public "sounds" bucket seen in Supabase
+  const bucketAudioFallback = "https://wgzrebgvcqnvcstdpwsa.supabase.co/storage/v1/object/public/sounds/default_audio.mp3";
+
+  // Use the incoming audio track if present (e.g., the iTunes preview URL); otherwise, fallback to the bucket
+  const finalAudioInput = audioUrl || bucketAudioFallback;
+
   // Executes native backend processing by creating a physical temporary file first
   ffmpeg()
-    // Add first input and immediately bind its options block
+    // Input 1: The remote video URL stream
     .input(videoUrl)
     .inputOptions(['-protocol_whitelist file,http,https,tcp,tls,crypto'])
     
-    // Add second input and immediately bind its options block
-    .input(audioUrl || '/sounds/default_audio.mp3') 
+    // Input 2: The remote audio URL stream (handles .m4a, .mp3, etc.)
+    .input(finalAudioInput) 
     .inputOptions(['-protocol_whitelist file,http,https,tcp,tls,crypto'])
     
     .outputOptions([
-      '-c:v copy',    // Copy video frames directly without expensive re-encoding
-      '-c:a aac',     // Encode audio stream to standard AAC format
-      '-map 0:v:0',   // Map the first input's raw video layer
-      '-map 1:a:0',   // Map the second input's raw audio layer
-      '-shortest'     // Constrain total length to match whichever file finishes first
+      '-c:v copy',             // Copy video frames instantly without expensive re-encoding
+      '-c:a aac',              // Explicitly re-encode audio to native AAC to ensure container alignment
+      '-b:a 128k',             // Secure a stable audio bit rate for standard media players
+      '-map 0:v:0',            // Map the first input's raw video channel
+      '-map 1:a:0',            // Map the second input's raw audio channel
+      '-movflags +faststart',  // CRITICAL: Relocates index metadata (moov atom) to the front so the downloaded file plays instantly
+      '-shortest'              // Clip video/audio timeline to whichever finishes first
     ])
     .toFormat('mp4')
     .on('start', (cmd) => {
