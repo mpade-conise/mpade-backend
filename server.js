@@ -65,7 +65,13 @@ app.post('/api/merge-video', async (req, res) => {
   const outputPath = path.join(os.tmpdir(), outputFilename);
 
   // Initialize fluent-ffmpeg targeting the remote source video URL
-  let ffmpegCommand = ffmpeg().input(videoUrl).inputOptions(['-protocol_whitelist file,http,https,tcp,tls,crypto']);
+  // +genpts rebuilds missing or broken timestamp markers directly on the incoming live stream
+  let ffmpegCommand = ffmpeg()
+    .input(videoUrl)
+    .inputOptions([
+      '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
+      '-fflags', '+genpts'
+    ]);
 
   // Robust check to handle variations of "null", undefined, or empty string values safely
   let hasCustomAudio = false;
@@ -120,7 +126,7 @@ app.post('/api/merge-video', async (req, res) => {
       if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
     })
     .on('end', () => {
-      console.log('✅ Video successfully generated on disk. Initializing download pipeline transfer...');
+      console.log('✅ Video successfully generated on disk. Initializing download pipeline transfer... ');
       
       // Serve the local processed file cleanly as an authorized binary attachment down to the browser
       res.download(outputPath, 'Mpade_Export.mp4', (downloadErr) => {
