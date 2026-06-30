@@ -67,9 +67,13 @@ app.post('/api/merge-video', async (req, res) => {
   // Initialize fluent-ffmpeg targeting the remote source video URL
   let ffmpegCommand = ffmpeg().input(videoUrl).inputOptions(['-protocol_whitelist file,http,https,tcp,tls,crypto']);
 
-  if (audioUrl) {
+  // Strict sanitization: check if the incoming tracking link is an actual URL string or empty/null
+  const rawAudioStr = String(audioUrl).trim().toLowerCase();
+  const hasCustomAudio = audioUrl && rawAudioStr !== 'null' && rawAudioStr !== 'undefined' && rawAudioStr !== '';
+
+  if (hasCustomAudio) {
     // CASE 1: Video uses an embedded sound link from the database (music_url is populated)
-    console.log('🎵 Custom embedded audio track detected. Multiplexing audio stream layers...');
+    console.log(`🎵 Custom embedded audio track detected (${audioUrl}). Multiplexing audio stream layers...`);
     ffmpegCommand
       .input(audioUrl)
       .inputOptions(['-protocol_whitelist file,http,https,tcp,tls,crypto'])
@@ -84,7 +88,7 @@ app.post('/api/merge-video', async (req, res) => {
       ]);
   } else {
     // CASE 2: audioUrl is NULL/missing. Video relies entirely on its ORIGINAL NATIVE SOUND
-    console.log('🗣️ Original native sound detected (audioUrl is NULL). Copying source media tracks directly...');
+    console.log('🗣️ Original native sound verified. Copying source media tracks directly...');
     ffmpegCommand
       .outputOptions([
         '-c:v copy',             // Pass video straight through without touch re-encoding
