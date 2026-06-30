@@ -2,6 +2,9 @@ const express = require('express');
 const cors = require('cors'); // 1. Import the cors package
 const app = express();
 const http = require('http').createServer(app);
+const path = require('path');
+const fs = require('fs'); // Required for clean-up and permission validation
+const os = require('os'); // Required for securing platform-independent temp folders
 
 // 2. Enable global CORS middleware explicitly for Express HTTP router pathways
 app.use(cors({
@@ -18,7 +21,25 @@ const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
 const ffmpeg = require('fluent-ffmpeg');
 
 // 4. Map the local installer binary pathway directly into your tool configurations
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+try {
+  const binaryPath = ffmpegInstaller.path;
+  
+  // Explicitly grant execution permissions if running inside Linux/Render environments
+  if (process.platform !== 'win32' && fs.existsSync(binaryPath)) {
+    try {
+      fs.chmodSync(binaryPath, '755'); 
+      console.log('🔓 Executable permissions successfully granted to FFmpeg binary.');
+    } catch (permErr) {
+      console.warn('⚠️ Warning: Could not explicitly set permissions on installer binary:', permErr.message);
+    }
+  }
+
+  ffmpeg.setFfmpegPath(binaryPath);
+  console.log(`🚀 FFmpeg path successfully mapped to: ${binaryPath}`);
+} catch (err) {
+  console.error('❌ Failed initializing installer binary path, checking system fallback...', err.message);
+  ffmpeg.setFfmpegPath('/usr/bin/ffmpeg'); 
+}
 
 // Add Express JSON parsing middleware for the inbound download request body
 app.use(express.json());
@@ -51,16 +72,16 @@ app.post('/api/merge-video', async (req, res) => {
     return res.status(400).json({ error: "Missing source videoUrl field." });
   }
 
-  // Set the response headers to stream an inline file directly to the client's browser download pipeline
-  res.setHeader('Content-Type', 'video/mp4');
-  res.setHeader('Content-Disposition', 'attachment; filename="Mpade_Export.mp4"');
+  // Generate a secure temporary path local to the host container environment
+  const outputFilename = `merged_${Date.now()}_${Math.floor(Math.random() * 1000)}.mp4`;
+  const outputPath = path.join(os.tmpdir(), outputFilename);
 
-  // Executes native backend processing using the host environment's system tools
+  // Executes native backend processing by creating a physical temporary file first
   ffmpeg()
     .input(videoUrl)
     .input(audioUrl || '/sounds/default_audio.mp3') // Fallback if no audio asset specified
     .inputOptions([
-      '-protocol_whitelist file,http,https,tcp,tls,crypto' // 🌟 Whitelist network protocols for remote resource streaming
+      '-protocol_whitelist file,http,https,tcp,tls,crypto' // Whitelist network protocols for remote resource streaming
     ])
     .outputOptions([
       '-c:v copy',    // Copy video frames directly without expensive re-encoding
@@ -70,13 +91,32 @@ app.post('/api/merge-video', async (req, res) => {
       '-shortest'     // Constrain total length to match whichever file finishes first
     ])
     .toFormat('mp4')
+    .on('start', (cmd) => {
+      console.log('🎬 Started Video Pipeline Processing to Disk...');
+    })
     .on('error', (err) => {
       console.error('❌ Server-Side Video Processing Pipeline Error:', err.message);
       if (!res.headersSent) {
-        res.status(500).send('Video generation pipeline encountered an issue.');
+        res.status(500).send(`Video generation pipeline encountered an issue: ${err.message}`);
       }
+      if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
     })
-    .pipe(res, { end: true }); // Automatically pipe the resulting output buffer back to the client
+    .on('end', () => {
+      console.log('✅ Video successfully generated on disk. Initializing download pipeline transfer...');
+      
+      // Serve the local processed file cleanly as an authorized binary attachment down to the browser
+      res.download(outputPath, 'Mpade_Export.mp4', (downloadErr) => {
+        if (downloadErr) {
+          console.error('❌ Error during transmission file transfer:', downloadErr);
+        }
+        // Always clean up the temporary workspace file to prevent storage leakage
+        if (fs.existsSync(outputPath)) {
+          fs.unlinkSync(outputPath);
+          console.log('🗑️ Cleaned up temporary processing file from disk.');
+        }
+      });
+    })
+    .save(outputPath); // Write directly to system disk first to guarantee cross-origin stream stability
 });
 
 io.on('connection', (socket) => {
