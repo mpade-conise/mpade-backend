@@ -82,8 +82,8 @@ app.post('/api/merge-video', async (req, res) => {
     ffmpegCommand
       .input(audioUrl)
       .inputOptions([
-        '-protocol_whitelist file,http,https,tcp,tls,crypto',
-        '-user_agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"'
+        '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
+        '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
       ])
       .outputOptions([
         '-c:v copy',             // Copy video frames instantly without expensive re-encoding
