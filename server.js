@@ -81,13 +81,17 @@ app.post('/api/merge-video', async (req, res) => {
     console.log(`🎵 Custom embedded audio track detected (${audioUrl}). Multiplexing audio stream layers...`);
     ffmpegCommand
       .input(audioUrl)
-      .inputOptions(['-protocol_whitelist file,http,https,tcp,tls,crypto'])
+      .inputOptions([
+        '-protocol_whitelist file,http,https,tcp,tls,crypto',
+        '-user_agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"'
+      ])
       .outputOptions([
         '-c:v copy',             // Copy video frames instantly without expensive re-encoding
         '-c:a aac',              // Explicitly re-encode custom track to native AAC for container alignment
         '-b:a 128k',             // Secure a stable audio bit rate for standard media players
         '-map 0:v:0',            // Map the first input's raw video channel
         '-map 1:a:0',            // Map the second input's raw audio channel
+        '-map_metadata -1',      // Clears container sync blockages that trigger SIGSEGV
         '-movflags +faststart',  // Relocates index metadata to the front so the file plays instantly
         '-shortest'              // Clip video/audio timeline to whichever finishes first
       ]);
