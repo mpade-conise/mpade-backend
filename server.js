@@ -52,7 +52,7 @@ app.get('/', (req, res) => {
   res.send('🚀 Mpade Socket Core Signaling Machine Operational');
 });
 
-// --- UPDATED STABLE VIDEO/AUDIO STREAM MERGE ENDPOINT ---
+// --- UPDATED DYNAMIC VIDEO/AUDIO STREAM MERGE ENDPOINT ---
 app.post('/api/merge-video', async (req, res) => {
   const { videoUrl, audioUrl } = req.body;
 
@@ -64,31 +64,37 @@ app.post('/api/merge-video', async (req, res) => {
   const outputFilename = `merged_${Date.now()}_${Math.floor(Math.random() * 1000)}.mp4`;
   const outputPath = path.join(os.tmpdir(), outputFilename);
 
-  // Dynamic Bucket Fallback Link: Points directly to your public "sounds" bucket seen in Supabase
-  const bucketAudioFallback = "https://wgzrebgvcqnvcstdpwsa.supabase.co/storage/v1/object/public/sounds/default_audio.mp3";
+  // Initialize fluent-ffmpeg targeting the remote source video URL
+  let ffmpegCommand = ffmpeg().input(videoUrl).inputOptions(['-protocol_whitelist file,http,https,tcp,tls,crypto']);
 
-  // Use the incoming audio track if present (e.g., the iTunes preview URL); otherwise, fallback to the bucket
-  const finalAudioInput = audioUrl || bucketAudioFallback;
+  if (audioUrl) {
+    // CASE 1: Video uses an embedded sound link from the database (music_url is populated)
+    console.log('🎵 Custom embedded audio track detected. Multiplexing audio stream layers...');
+    ffmpegCommand
+      .input(audioUrl)
+      .inputOptions(['-protocol_whitelist file,http,https,tcp,tls,crypto'])
+      .outputOptions([
+        '-c:v copy',             // Copy video frames instantly without expensive re-encoding
+        '-c:a aac',              // Explicitly re-encode custom track to native AAC for container alignment
+        '-b:a 128k',             // Secure a stable audio bit rate for standard media players
+        '-map 0:v:0',            // Map the first input's raw video channel
+        '-map 1:a:0',            // Map the second input's raw audio channel
+        '-movflags +faststart',  // Relocates index metadata to the front so the file plays instantly
+        '-shortest'              // Clip video/audio timeline to whichever finishes first
+      ]);
+  } else {
+    // CASE 2: audioUrl is NULL/missing. Video relies entirely on its ORIGINAL NATIVE SOUND
+    console.log('🗣️ Original native sound detected (audioUrl is NULL). Copying source media tracks directly...');
+    ffmpegCommand
+      .outputOptions([
+        '-c:v copy',             // Pass video straight through without touch re-encoding
+        '-c:a copy',             // COPY ORIGINAL NATIVE AUDIO STREAM DIRECTLY WITHOUT ALTERING IT
+        '-movflags +faststart'   // Relocates index metadata to the front for smooth streaming downloads
+      ]);
+  }
 
-  // Executes native backend processing by creating a physical temporary file first
-  ffmpeg()
-    // Input 1: The remote video URL stream
-    .input(videoUrl)
-    .inputOptions(['-protocol_whitelist file,http,https,tcp,tls,crypto'])
-    
-    // Input 2: The remote audio URL stream (handles .m4a, .mp3, etc.)
-    .input(finalAudioInput) 
-    .inputOptions(['-protocol_whitelist file,http,https,tcp,tls,crypto'])
-    
-    .outputOptions([
-      '-c:v copy',             // Copy video frames instantly without expensive re-encoding
-      '-c:a aac',              // Explicitly re-encode audio to native AAC to ensure container alignment
-      '-b:a 128k',             // Secure a stable audio bit rate for standard media players
-      '-map 0:v:0',            // Map the first input's raw video channel
-      '-map 1:a:0',            // Map the second input's raw audio channel
-      '-movflags +faststart',  // CRITICAL: Relocates index metadata (moov atom) to the front so the downloaded file plays instantly
-      '-shortest'              // Clip video/audio timeline to whichever finishes first
-    ])
+  // Executes native backend processing by writing out to a workspace file on disk
+  ffmpegCommand
     .toFormat('mp4')
     .on('start', (cmd) => {
       console.log('🎬 Started Video Pipeline Processing to Disk...');
