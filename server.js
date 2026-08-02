@@ -11,7 +11,7 @@ const os = require('os'); // Required for securing platform-independent temp fol
 app.use(cors({
   origin: [
     "https://progress-lake.vercel.app", // Your live Vercel production deployment
-    "http://localhost:5173"              // Your local Vite development server
+    "http://localhost:5173"               // Your local Vite development server
   ],
   methods: ["GET", "POST", "OPTIONS"],
   credentials: true
@@ -229,6 +229,12 @@ io.on('connection', (socket) => {
         });
       }
     }
+  });
+
+  // Dynamic Peer-Ready Synchronization Handler (Fixes multi-refresh race conditions)
+  socket.on('peer_ready', ({ roomId, userId }) => {
+    console.log(`⚡ Receiver/Peer (${userId || socket.id}) is mounted and ready in room: ${roomId}`);
+    socket.to(roomId).emit('peer_ready', { userId, socketId: socket.id });
   });
 
   socket.on('reject_incoming_call', ({ roomId, to }) => {
