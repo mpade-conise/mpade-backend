@@ -1,3 +1,4 @@
+
 const express = require('express');
 const cors = require('cors'); // 1. Import the cors package
 const app = express();
@@ -182,6 +183,7 @@ io.on('connection', (socket) => {
   }
 
   socket.on('register_user_session', ({ userId }) => {
+    if (!userId) return;
     socket.userId = userId;
     activeUsers.set(userId, socket.id);
     io.emit('friend_presence_changed', { userId, status: 'online' });
@@ -208,7 +210,7 @@ io.on('connection', (socket) => {
     socket.join(roomId);
     console.log(`📞 Socket ${socket.id} joined dedicated P2P WebRTC call room: ${roomId}`);
     
-    if (userId && !socket.userId) {
+    if (userId) {
       socket.userId = userId;
       activeUsers.set(userId, socket.id);
     }
@@ -231,7 +233,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Dynamic Peer-Ready Synchronization Handler (Fixes multi-refresh race conditions)
+  // Dynamic Peer-Ready Synchronization Handler
   socket.on('peer_ready', ({ roomId, userId }) => {
     console.log(`⚡ Receiver/Peer (${userId || socket.id}) is mounted and ready in room: ${roomId}`);
     socket.to(roomId).emit('peer_ready', { userId, socketId: socket.id });
@@ -242,6 +244,8 @@ io.on('connection', (socket) => {
     if (targetSocketId) {
       console.log(`🚫 Call rejected by peer. Notifying origin socket: ${targetSocketId}`);
       io.to(targetSocketId).emit('peer_hung_up');
+    } else if (roomId) {
+      socket.to(roomId).emit('peer_hung_up');
     }
   });
 
@@ -277,52 +281,51 @@ io.on('connection', (socket) => {
     socket.to(streamId).emit('viewer_requesting_stream', { viewerSocketId: socket.id });
   });
 
+  // --- REINFORCED WEBRTC SIGNALING HANDLERS WITH ROOM FALLBACKS ---
+
   socket.on('send_webrtc_offer', (data) => {
     const { streamId, roomId, offer, targetViewerId, to } = data;
     const targetId = targetViewerId || to;
-    const directUserSocket = activeUsers.get(targetId);
+    const activeRoom = roomId || streamId;
+    const targetSocketId = targetId ? activeUsers.get(targetId) : null;
     
-    if (directUserSocket) {
-      io.to(directUserSocket).emit('webrtc_offer_received', { offer, hostSocketId: socket.id });
-      io.to(directUserSocket).emit('webrtc_offer', { offer, hostSocketId: socket.id });
-    } else if (targetId) {
-      io.to(targetId).emit('webrtc_offer_received', { offer, hostSocketId: socket.id });
-    } else {
-      const activeRoom = roomId || streamId;
+    console.log(`📤 Offer from ${socket.id} -> Target ID: ${targetId} | Room: ${activeRoom}`);
+
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('webrtc_offer_received', { offer, hostSocketId: socket.id });
+    } else if (activeRoom) {
       socket.to(activeRoom).emit('webrtc_offer_received', { offer, hostSocketId: socket.id });
     }
   });
 
   socket.on('send_webrtc_answer', (data) => {
     const { streamId, roomId, answer, to } = data;
-    const directUserSocket = activeUsers.get(to);
-    if (directUserSocket) {
-      io.to(directUserSocket).emit('webrtc_answer_received', { answer, viewerSocketId: socket.id });
-      io.to(directUserSocket).emit('webrtc_answer', { answer, viewerSocketId: socket.id });
-    } else {
-      const activeRoom = streamId || roomId;
+    const activeRoom = roomId || streamId;
+    const targetSocketId = to ? activeUsers.get(to) : null;
+
+    console.log(`📥 Answer from ${socket.id} -> Target ID: ${to} | Room: ${activeRoom}`);
+
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('webrtc_answer_received', { answer, viewerSocketId: socket.id });
+    } else if (activeRoom) {
       socket.to(activeRoom).emit('webrtc_answer_received', { answer, viewerSocketId: socket.id });
-      socket.to(activeRoom).emit('webrtc_answer', { answer, viewerSocketId: socket.id });
     }
   });
 
   socket.on('webrtc_ice_candidate', (data) => {
     const { streamId, roomId, candidate, targetSocketId, to, senderType } = data;
-    const destinationUser = to;
-    const directUserSocket = activeUsers.get(destinationUser);
-    const targetId = targetSocketId || directUserSocket;
-    
-    if (targetId) {
-      io.to(targetId).emit('incoming_ice_candidate', { candidate, senderType, senderSocketId: socket.id });
-      io.to(targetId).emit('webrtc_ice_candidate', { candidate, senderType, senderSocketId: socket.id });
-    } else {
-      const activeRoom = streamId || roomId;
+    const activeRoom = roomId || streamId;
+    const destinationUser = to || targetSocketId;
+    const targetSocket = destinationUser ? activeUsers.get(destinationUser) : null;
+
+    if (targetSocket) {
+      io.to(targetSocket).emit('incoming_ice_candidate', { candidate, senderType, senderSocketId: socket.id });
+    } else if (activeRoom) {
       socket.to(activeRoom).emit('incoming_ice_candidate', { candidate, senderType, senderSocketId: socket.id });
-      socket.to(activeRoom).emit('webrtc_ice_candidate', { candidate, senderType, senderSocketId: socket.id });
     }
   });
 
-  // Legacy events alias alignment mappings
+  // Legacy event aliases mapping directly to standard handlers
   socket.on('webrtc_offer', (data) => socket.emit('send_webrtc_offer', data));
   socket.on('webrtc_answer', (data) => socket.emit('send_webrtc_answer', data));
   socket.on('send_ice_candidate', (data) => socket.emit('webrtc_ice_candidate', data));
