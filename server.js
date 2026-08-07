@@ -1,4 +1,3 @@
-
 const express = require('express');
 const cors = require('cors'); // 1. Import the cors package
 const app = express();
@@ -38,7 +37,7 @@ const io = require('socket.io')(http, {
   cors: {
     origin: [
       "https://progress-lake.vercel.app", // Your live Vercel production deployment
-      "http://localhost:5173"              // Your local Vite development server
+      "http://localhost:5173"               // Your local Vite development server
     ],
     methods: ["GET", "POST"],
     credentials: true
@@ -47,6 +46,9 @@ const io = require('socket.io')(http, {
 
 // Tracks global user sessions dynamically (userId -> socketId)
 const activeUsers = new Map(); 
+
+// Tracks multi-panel stream room states (streamId -> { hostSocketId, guestPanels: Map(guestId -> socketId) })
+const streamRooms = new Map();
 
 // A quick health-check route to help wake up or ping the Render container manually
 app.get('/', (req, res) => {
@@ -66,7 +68,6 @@ app.post('/api/merge-video', async (req, res) => {
   const outputPath = path.join(os.tmpdir(), outputFilename);
 
   // Initialize fluent-ffmpeg targeting the remote source video URL
-  // +genpts rebuilds missing or broken timestamp markers directly on the incoming live stream
   let ffmpegCommand = ffmpeg()
     .input(videoUrl)
     .inputOptions([
@@ -74,7 +75,6 @@ app.post('/api/merge-video', async (req, res) => {
       '-fflags', '+genpts'
     ]);
 
-  // Robust check to handle variations of "null", undefined, or empty string values safely
   let hasCustomAudio = false;
   if (audioUrl) {
     const cleanAudioStr = String(audioUrl).trim().toLowerCase();
@@ -84,7 +84,6 @@ app.post('/api/merge-video', async (req, res) => {
   }
 
   if (hasCustomAudio) {
-    // CASE 1: Video uses a valid external sound link from the database
     console.log(`🎵 Custom embedded audio track detected (${audioUrl}). Multiplexing audio stream layers...`);
     ffmpegCommand
       .input(audioUrl)
@@ -93,27 +92,25 @@ app.post('/api/merge-video', async (req, res) => {
         '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
       ])
       .outputOptions([
-        '-c:v copy',             // Copy video frames instantly without expensive re-encoding
-        '-c:a aac',              // Explicitly re-encode custom track to native AAC for container alignment
-        '-b:a 128k',             // Secure a stable audio bit rate for standard media players
+        '-c:v copy',             // Copy video frames instantly without re-encoding
+        '-c:a aac',              // Explicitly re-encode custom track to native AAC
+        '-b:a 128k',             // Secure a stable audio bit rate
         '-map 0:v:0',            // Map the first input's raw video channel
         '-map 1:a:0',            // Map the second input's raw audio channel
-        '-map_metadata -1',      // Clears container sync blockages that trigger SIGSEGV
-        '-movflags +faststart',  // Relocates index metadata to the front so the file plays instantly
-        '-shortest'              // Clip video/audio timeline to whichever finishes first
+        '-map_metadata -1',      // Clears container sync blockages
+        '-movflags +faststart',  // Faststart for instant streaming
+        '-shortest'              // Clip timeline to shorter input
       ]);
   } else {
-    // CASE 2: audioUrl is NULL/missing. Video relies entirely on its ORIGINAL NATIVE SOUND
     console.log('🗣️ Original native sound verified. Copying source media tracks directly...');
     ffmpegCommand
       .outputOptions([
-        '-c:v copy',             // Pass video straight through without touch re-encoding
-        '-c:a copy',             // COPY ORIGINAL NATIVE AUDIO STREAM DIRECTLY WITHOUT ALTERING IT
-        '-movflags +faststart'   // Relocates index metadata to the front for smooth streaming downloads
+        '-c:v copy',
+        '-c:a copy',
+        '-movflags +faststart'
       ]);
   }
 
-  // Executes native backend processing by writing out to a workspace file on disk
   ffmpegCommand
     .toFormat('mp4')
     .on('start', (cmd) => {
@@ -128,20 +125,17 @@ app.post('/api/merge-video', async (req, res) => {
     })
     .on('end', () => {
       console.log('✅ Video successfully generated on disk. Initializing download pipeline transfer... ');
-      
-      // Serve the local processed file cleanly as an authorized binary attachment down to the browser
       res.download(outputPath, 'Mpade_Export.mp4', (downloadErr) => {
         if (downloadErr) {
           console.error('❌ Error during transmission file transfer:', downloadErr);
         }
-        // Always clean up the temporary workspace file to prevent storage leakage
         if (fs.existsSync(outputPath)) {
           fs.unlinkSync(outputPath);
           console.log('🗑️ Cleaned up temporary processing file from disk.');
         }
       });
     })
-    .save(outputPath); // Write directly to system disk first to guarantee cross-origin stream stability
+    .save(outputPath);
 });
 
 io.on('connection', (socket) => {
@@ -155,6 +149,17 @@ io.on('connection', (socket) => {
       const hostIdentifier = streamId || room;
       activeUsers.set(hostIdentifier, socket.id);
       socket.hostIdentifier = hostIdentifier;
+
+      // Register host room in multi-panel registry
+      if (!streamRooms.has(hostIdentifier)) {
+        streamRooms.set(hostIdentifier, {
+          hostSocketId: socket.id,
+          guestPanels: new Map()
+        });
+      } else {
+        streamRooms.get(hostIdentifier).hostSocketId = socket.id;
+      }
+
       console.log(`📡 Registered Host globally in active reference index: [${hostIdentifier}] -> Socket ${socket.id}`);
     }
   } else {
@@ -189,6 +194,8 @@ io.on('connection', (socket) => {
     io.emit('friend_presence_changed', { userId, status: 'online' });
     console.log(`🟢 User ${userId} bound to notification session map: ${socket.id}`);
   });
+
+  // --- 1-ON-1 DIRECT VIDEO/AUDIO CALL ROUTING (PRESERVED) ---
 
   socket.on('initiate_call_signal', (callPayload) => {
     const targetSocketId = activeUsers.get(callPayload.receiverId);
@@ -233,7 +240,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Dynamic Peer-Ready Synchronization Handler
   socket.on('peer_ready', ({ roomId, userId }) => {
     console.log(`⚡ Receiver/Peer (${userId || socket.id}) is mounted and ready in room: ${roomId}`);
     socket.to(roomId).emit('peer_ready', { userId, socketId: socket.id });
@@ -248,6 +254,69 @@ io.on('connection', (socket) => {
       socket.to(roomId).emit('peer_hung_up');
     }
   });
+
+  // --- MULTI-PANEL LIVE STREAMING INGEST & RELAY EVENTS (NEW) ---
+
+  socket.on('publish_guest_feed', ({ streamId, guestId, targetHostId, sdpOffer, mode }) => {
+    const targetHostSocketId = activeUsers.get(targetHostId) || streamRooms.get(streamId)?.hostSocketId;
+
+    if (!streamRooms.has(streamId)) {
+      streamRooms.set(streamId, { hostSocketId: targetHostSocketId, guestPanels: new Map() });
+    }
+    const room = streamRooms.get(streamId);
+    room.guestPanels.set(guestId, socket.id);
+    socket.data = { ...socket.data, isGuestPanel: true, guestId, streamId };
+
+    console.log(`🎥 [MULTI-PANEL INGEST] Guest ${guestId} sending ${mode} stream feed to Host ${targetHostId}`);
+
+    if (targetHostSocketId) {
+      io.to(targetHostSocketId).emit('incoming_guest_panel_feed', {
+        guestId,
+        guestSocketId: socket.id,
+        sdpOffer,
+        mode
+      });
+    } else {
+      socket.to(streamId).emit('incoming_guest_panel_feed', {
+        guestId,
+        guestSocketId: socket.id,
+        sdpOffer,
+        mode
+      });
+    }
+  });
+
+  socket.on('host_ack_guest_feed', ({ guestSocketId, sdpAnswer, guestId }) => {
+    console.log(`✅ [MULTI-PANEL ACK] Host accepted panel stream from guest ${guestId}`);
+    io.to(guestSocketId).emit('broadcast_ack_received', { sdpAnswer });
+  });
+
+  socket.on('guest_ice_candidate', ({ streamId, candidate, to }) => {
+    const targetHostSocketId = activeUsers.get(to) || streamRooms.get(streamId)?.hostSocketId;
+    if (targetHostSocketId) {
+      io.to(targetHostSocketId).emit('incoming_guest_ice', { candidate, fromGuestSocketId: socket.id });
+    } else if (streamId) {
+      socket.to(streamId).emit('incoming_guest_ice', { candidate, fromGuestSocketId: socket.id });
+    }
+  });
+
+  socket.on('host_ice_candidate', ({ targetGuestSocketId, candidate }) => {
+    if (targetGuestSocketId) {
+      io.to(targetGuestSocketId).emit('incoming_host_ice', { candidate });
+    }
+  });
+
+  socket.on('remove_guest_panel', ({ streamId, guestId }) => {
+    const room = streamRooms.get(streamId);
+    if (room && room.guestPanels.has(guestId)) {
+      const guestSocketId = room.guestPanels.get(guestId);
+      io.to(guestSocketId).emit('removed_from_panel');
+      room.guestPanels.delete(guestId);
+      console.log(`🚫 [MULTI-PANEL REMOVED] Guest ${guestId} removed from multi-panel layout`);
+    }
+  });
+
+  // --- GENERAL STREAMING & SIGNALING EVENTS ---
 
   socket.on('send_cohost_invite', (data) => {
     const targetSocketId = activeUsers.get(data.targetUserId);
@@ -281,7 +350,7 @@ io.on('connection', (socket) => {
     socket.to(streamId).emit('viewer_requesting_stream', { viewerSocketId: socket.id });
   });
 
-  // --- REINFORCED WEBRTC SIGNALING HANDLERS WITH ROOM FALLBACKS ---
+  // --- WEBRTC SIGNALING HANDLERS WITH ROOM FALLBACKS ---
 
   socket.on('send_webrtc_offer', (data) => {
     const { streamId, roomId, offer, targetViewerId, to } = data;
@@ -330,6 +399,8 @@ io.on('connection', (socket) => {
   socket.on('webrtc_answer', (data) => socket.emit('send_webrtc_answer', data));
   socket.on('send_ice_candidate', (data) => socket.emit('webrtc_ice_candidate', data));
 
+  // --- CHAT & USER PRESENCE ---
+
   socket.on('user_going_online', (userId) => {
     socket.userId = userId;
     activeUsers.set(userId, socket.id);
@@ -362,8 +433,20 @@ io.on('connection', (socket) => {
         broadcastRoomPresence(room);
       }
     }
+
+    if (socket.data?.isGuestPanel && socket.data?.streamId) {
+      const roomState = streamRooms.get(socket.data.streamId);
+      if (roomState) {
+        roomState.guestPanels.delete(socket.data.guestId);
+        if (roomState.hostSocketId) {
+          io.to(roomState.hostSocketId).emit('guest_panel_disconnected', { guestId: socket.data.guestId });
+        }
+      }
+    }
+
     if (socket.hostIdentifier) {
       activeUsers.delete(socket.hostIdentifier);
+      streamRooms.delete(socket.hostIdentifier);
     }
     if (socket.userId) {
       activeUsers.delete(socket.userId);
