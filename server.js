@@ -255,7 +255,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // --- MULTI-PANEL LIVE STREAMING INGEST & RELAY EVENTS (NEW) ---
+  // --- MULTI-PANEL LIVE STREAMING INGEST & RELAY EVENTS ---
 
   socket.on('publish_guest_feed', ({ streamId, guestId, targetHostId, sdpOffer, mode }) => {
     const targetHostSocketId = activeUsers.get(targetHostId) || streamRooms.get(streamId)?.hostSocketId;
@@ -316,6 +316,28 @@ io.on('connection', (socket) => {
     }
   });
 
+  // --- CO-HOST / GUEST APPROVAL & MANAGEMENT HANDLERS ---
+
+  socket.on('approve_cohost', ({ streamId, guestId, mode }) => {
+    console.log(`✅ [COHOST] Host approved guest ${guestId} for stream ${streamId} in ${mode} mode`);
+    io.to(streamId).emit('cohost_approved', { streamId, guestId, mode });
+    
+    const targetGuestSocketId = activeUsers.get(guestId);
+    if (targetGuestSocketId) {
+      io.to(targetGuestSocketId).emit('cohost_approved', { streamId, guestId, mode });
+    }
+  });
+
+  socket.on('kick_cohost', ({ streamId, guestId }) => {
+    console.log(`🚫 [COHOST] Host kicked guest ${guestId} from stream ${streamId}`);
+    io.to(streamId).emit('cohost_kicked', { streamId, guestId });
+    
+    const targetGuestSocketId = activeUsers.get(guestId);
+    if (targetGuestSocketId) {
+      io.to(targetGuestSocketId).emit('cohost_kicked', { streamId, guestId });
+    }
+  });
+
   // --- GENERAL STREAMING & SIGNALING EVENTS ---
 
   socket.on('send_cohost_invite', (data) => {
@@ -333,7 +355,7 @@ io.on('connection', (socket) => {
   socket.on('respond_cohost_invite', (data) => {
     const originHostSocketId = activeUsers.get(data.targetUserId);
     if (originHostSocketId) {
-      console.log(`📥 Routing invite response status [${data.status}] back to origin room host socket: ${originHostSocketId}`);
+      console.log(`📥 Routing invite response status [${data.status}] back to origin room host socket: ${originHostHostSocketId || originHostSocketId}`);
       io.to(originHostSocketId).emit('cohost_invite_accepted', {
         room: data.room,
         status: data.status
@@ -350,20 +372,30 @@ io.on('connection', (socket) => {
     socket.to(streamId).emit('viewer_requesting_stream', { viewerSocketId: socket.id });
   });
 
-  // --- WEBRTC SIGNALING HANDLERS WITH ROOM FALLBACKS ---
+  // --- REINFORCED WEBRTC SIGNALING HANDLERS WITH ROOM FALLBACKS ---
 
   socket.on('send_webrtc_offer', (data) => {
-    const { streamId, roomId, offer, targetViewerId, to } = data;
-    const targetId = targetViewerId || to;
+    const { streamId, roomId, offer, targetViewerId, to, guestId, mode } = data;
     const activeRoom = roomId || streamId;
+    const targetId = targetViewerId || to;
     const targetSocketId = targetId ? activeUsers.get(targetId) : null;
-    
-    console.log(`📤 Offer from ${socket.id} -> Target ID: ${targetId} | Room: ${activeRoom}`);
+
+    console.log(`📤 WebRTC Offer from ${socket.id} -> Target: ${targetId || activeRoom}`);
+
+    const offerPayload = {
+      offer,
+      guestId: guestId || socket.userId || socket.id,
+      mode: mode || 'video',
+      hostSocketId: socket.id,
+      senderSocketId: socket.id
+    };
 
     if (targetSocketId) {
-      io.to(targetSocketId).emit('webrtc_offer_received', { offer, hostSocketId: socket.id });
+      io.to(targetSocketId).emit('send_webrtc_offer', offerPayload);
+      io.to(targetSocketId).emit('webrtc_offer_received', offerPayload);
     } else if (activeRoom) {
-      socket.to(activeRoom).emit('webrtc_offer_received', { offer, hostSocketId: socket.id });
+      socket.to(activeRoom).emit('send_webrtc_offer', offerPayload);
+      socket.to(activeRoom).emit('webrtc_offer_received', offerPayload);
     }
   });
 
@@ -375,9 +407,9 @@ io.on('connection', (socket) => {
     console.log(`📥 Answer from ${socket.id} -> Target ID: ${to} | Room: ${activeRoom}`);
 
     if (targetSocketId) {
-      io.to(targetSocketId).emit('webrtc_answer_received', { answer, viewerSocketId: socket.id });
+      io.to(targetSocketId).emit('webrtc_answer_received', { answer, viewerSocketId: socket.id, senderSocketId: socket.id });
     } else if (activeRoom) {
-      socket.to(activeRoom).emit('webrtc_answer_received', { answer, viewerSocketId: socket.id });
+      socket.to(activeRoom).emit('webrtc_answer_received', { answer, viewerSocketId: socket.id, senderSocketId: socket.id });
     }
   });
 
