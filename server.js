@@ -4,6 +4,8 @@ const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { Readable } = require('stream');
+const { pipeline } = require('stream/promises');
 
 const {
   S3Client,
@@ -45,7 +47,12 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '2mb' }));
+
+/* =========================================================
+   FFMPEG
+========================================================= */
 
 const systemFfmpegPath = '/usr/bin/ffmpeg';
 
@@ -53,10 +60,12 @@ if (fs.existsSync(systemFfmpegPath)) {
   ffmpeg.setFfmpegPath(systemFfmpegPath);
   console.log(`🚀 FFmpeg mapped to ${systemFfmpegPath}`);
 } else {
-  console.log(
-    'ℹ️ System FFmpeg not found; using fluent-ffmpeg default configuration.'
-  );
+  console.log('ℹ️ System FFmpeg not found; using fluent-ffmpeg default configuration.');
 }
+
+/* =========================================================
+   SOCKET.IO
+========================================================= */
 
 const io = require('socket.io')(http, {
   cors: {
@@ -94,9 +103,7 @@ if (b2Configured) {
 
   console.log('☁️ Backblaze B2 storage client initialized.');
 } else {
-  console.warn(
-    '⚠️ Backblaze B2 environment variables are incomplete.'
-  );
+  console.warn('⚠️ Backblaze B2 environment variables are incomplete.');
 }
 
 /* =========================================================
@@ -124,13 +131,8 @@ const authenticateSupabaseUser = async (req, res, next) => {
       });
     }
 
-    if (
-      !process.env.SUPABASE_URL ||
-      !process.env.SUPABASE_ANON_KEY
-    ) {
-      console.error(
-        '❌ SUPABASE_URL or SUPABASE_ANON_KEY is missing.'
-      );
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
+      console.error('❌ SUPABASE_URL or SUPABASE_ANON_KEY is missing.');
 
       return res.status(503).json({
         error: 'Storage authentication is not configured on the server.',
@@ -140,16 +142,13 @@ const authenticateSupabaseUser = async (req, res, next) => {
 
     const supabaseUrl = process.env.SUPABASE_URL.replace(/\/+$/, '');
 
-    const response = await fetch(
-      `${supabaseUrl}/auth/v1/user`,
-      {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          apikey: process.env.SUPABASE_ANON_KEY
-        }
+    const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        apikey: process.env.SUPABASE_ANON_KEY
       }
-    );
+    });
 
     if (!response.ok) {
       return res.status(401).json({
@@ -171,10 +170,7 @@ const authenticateSupabaseUser = async (req, res, next) => {
 
     return next();
   } catch (error) {
-    console.error(
-      '❌ Supabase authentication error:',
-      error.message
-    );
+    console.error('❌ Supabase authentication error:', error.message);
 
     return res.status(500).json({
       error: 'Authentication service temporarily unavailable.',
@@ -213,9 +209,7 @@ const sanitizeFileName = (fileName) => {
 };
 
 const getExtension = (fileName) => {
-  const ext = path
-    .extname(String(fileName || ''))
-    .toLowerCase();
+  const ext = path.extname(String(fileName || '')).toLowerCase();
 
   if (!ext || ext.length > 12) {
     return '';
@@ -229,22 +223,21 @@ const isValidContentType = (contentType) => {
     return false;
   }
 
-  return /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(
-    contentType
-  );
+  return /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(contentType);
 };
 
-const createStorageObjectKey = (
-  userId,
-  folder,
-  fileName
-) => {
-  const safeFolder = String(folder).toLowerCase();
+const createStorageObjectKey = (userId, folder, fileName) => {
+  const safeUserId = String(userId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+
+  const safeFolder = String(folder || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '');
+
   const safeName = sanitizeFileName(fileName);
   const extension = getExtension(safeName);
   const randomId = crypto.randomUUID();
 
-  return `${safeFolder}/${userId}/${Date.now()}-${randomId}${extension}`;
+  return `${safeFolder}/${safeUserId}/${Date.now()}-${randomId}${extension}`;
 };
 
 const parseStorageObjectKey = (objectKey) => {
@@ -277,15 +270,13 @@ const parseStorageObjectKey = (objectKey) => {
   }
 
   return {
+    valid: true,
     normalizedKey,
+    objectKey: normalizedKey,
     folder,
     ownerId
   };
 };
-
-/* =========================================================
-   URL VALIDATION
-========================================================= */
 
 const isHttpUrl = (value) => {
   if (!value || typeof value !== 'string') {
@@ -302,6 +293,283 @@ const isHttpUrl = (value) => {
   } catch {
     return false;
   }
+};
+
+/* =========================================================
+   TEMP FILE HELPERS
+========================================================= */
+
+const safeUnlink = (filePath) => {
+  if (!filePath) {
+    return;
+  }
+
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch (error) {
+    console.warn(`⚠️ Could not remove temporary file ${filePath}: ${error.message}`);
+  }
+};
+
+const cleanupTempFiles = (...filePaths) => {
+  for (const filePath of filePaths) {
+    safeUnlink(filePath);
+  }
+};
+
+/* =========================================================
+   DOWNLOAD PRIVATE B2 OBJECT
+========================================================= */
+
+const downloadB2ObjectToFile = async (objectKey, outputPath) => {
+  const parsed = parseStorageObjectKey(objectKey);
+
+  if (!parsed) {
+    throw new Error('Invalid B2 object key.');
+  }
+
+  const command = new GetObjectCommand({
+    Bucket: process.env.B2_BUCKET,
+    Key: parsed.normalizedKey
+  });
+
+  const response = await b2.send(command);
+
+  if (!response.Body) {
+    throw new Error('B2 returned an empty object body.');
+  }
+
+  if (typeof response.Body.pipe === 'function') {
+    await pipeline(response.Body, fs.createWriteStream(outputPath));
+    return;
+  }
+
+  if (typeof response.Body.transformToByteArray === 'function') {
+    const bytes = await response.Body.transformToByteArray();
+    await fs.promises.writeFile(outputPath, Buffer.from(bytes));
+    return;
+  }
+
+  throw new Error('Unsupported B2 response body type.');
+};
+
+/* =========================================================
+   DOWNLOAD REMOTE AUDIO
+========================================================= */
+
+const downloadRemoteAudioToFile = async (audioUrl, outputPath) => {
+  if (!isHttpUrl(audioUrl)) {
+    throw new Error('Invalid audio URL.');
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
+
+  try {
+    const response = await fetch(audioUrl, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0'
+      },
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      throw new Error(`Audio download failed with HTTP ${response.status}.`);
+    }
+
+    if (!response.body) {
+      throw new Error('Audio response contained no body.');
+    }
+
+    await pipeline(
+      Readable.fromWeb(response.body),
+      fs.createWriteStream(outputPath)
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+/* =========================================================
+   PROCESS VIDEO WITH FFMPEG
+========================================================= */
+
+const processVideoWithFFmpeg = ({
+  sourcePath,
+  audioPath,
+  outputPath,
+  videoVolume,
+  musicVolume,
+  audioEnhancement,
+  filter
+}) => {
+  return new Promise((resolve, reject) => {
+    const hasMusic = Boolean(audioPath);
+
+    let command = ffmpeg(sourcePath);
+
+    if (hasMusic) {
+      command = command.input(audioPath);
+    }
+
+    const filters = [];
+
+    const safeVideoVolume = Math.max(
+      0,
+      Math.min(2, Number(videoVolume ?? 1))
+    );
+
+    const safeMusicVolume = Math.max(
+      0,
+      Math.min(2, Number(musicVolume ?? 1))
+    );
+
+    if (filter && typeof filter === 'string') {
+      const normalizedFilter = filter.trim().toLowerCase();
+
+      const videoFilters = {
+        none: null,
+        normal: null,
+        grayscale: 'hue=s=0',
+        sepia: 'colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131',
+        vivid: 'eq=contrast=1.12:saturation=1.25:brightness=0.02',
+        bright: 'eq=brightness=0.08:contrast=1.05',
+        dark: 'eq=brightness=-0.08:contrast=1.05',
+        warm: 'colorbalance=rs=.08:gs=.03:bs=-.03',
+        cool: 'colorbalance=rs=-.03:gs=.03:bs=.08'
+      };
+
+      if (videoFilters[normalizedFilter]) {
+        filters.push(videoFilters[normalizedFilter]);
+      }
+    }
+
+    if (filters.length) {
+      command.videoFilters(filters);
+    }
+
+    if (hasMusic) {
+      const audioFilters = [];
+
+      audioFilters.push(
+        `[0:a]volume=${safeVideoVolume}[original_audio]`
+      );
+
+      audioFilters.push(
+        `[1:a]volume=${safeMusicVolume}[music_audio]`
+      );
+
+      if (audioEnhancement === 'crystal_voice') {
+        audioFilters.push(
+          '[original_audio]highpass=f=80,lowpass=f=12000,acompressor=threshold=-18dB:ratio=3:attack=20:release=250[voice_processed]'
+        );
+
+        audioFilters.push(
+          '[voice_processed][music_audio]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mixed_audio]'
+        );
+      } else if (audioEnhancement === 'studio_master') {
+        audioFilters.push(
+          '[original_audio]highpass=f=50,lowpass=f=16000,acompressor=threshold=-16dB:ratio=2.5:attack=15:release=200,equalizer=f=3000:t=q:w=1:g=2[voice_processed]'
+        );
+
+        audioFilters.push(
+          '[voice_processed][music_audio]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mixed_audio]'
+        );
+      } else if (audioEnhancement === 'bass_boost') {
+        audioFilters.push(
+          '[original_audio]bass=g=5:f=100[voice_processed]'
+        );
+
+        audioFilters.push(
+          '[voice_processed][music_audio]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mixed_audio]'
+        );
+      } else {
+        audioFilters.push(
+          '[original_audio][music_audio]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mixed_audio]'
+        );
+      }
+
+      command.complexFilter(audioFilters, 'mixed_audio');
+
+      command.outputOptions([
+        '-map',
+        '0:v:0',
+        '-map',
+        '[mixed_audio]',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '23',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        '-movflags',
+        '+faststart',
+        '-shortest',
+        '-map_metadata',
+        '-1'
+      ]);
+    } else {
+      command.outputOptions([
+        '-map',
+        '0:v:0',
+        '-map',
+        '0:a?',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '23',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        '-movflags',
+        '+faststart',
+        '-map_metadata',
+        '-1'
+      ]);
+    }
+
+    command
+      .toFormat('mp4')
+      .on('start', (commandLine) => {
+        console.log('🎬 FFmpeg started.');
+        console.log(commandLine);
+      })
+      .on('progress', (progress) => {
+        if (progress.percent !== undefined) {
+          console.log(
+            `🎬 FFmpeg progress: ${Number(progress.percent).toFixed(1)}%`
+          );
+        }
+      })
+      .on('error', (error, stdout, stderr) => {
+        console.error('❌ FFmpeg processing error:', error.message);
+
+        if (stderr) {
+          console.error(stderr.slice(-4000));
+        }
+
+        reject(error);
+      })
+      .on('end', () => {
+        console.log('✅ FFmpeg processing completed.');
+        resolve();
+      })
+      .save(outputPath);
+  });
 };
 
 /* =========================================================
@@ -361,26 +629,16 @@ app.post(
         });
       }
 
-      const normalizedFolder =
-        String(folder).toLowerCase();
+      const normalizedFolder = String(folder).toLowerCase();
 
-      if (
-        !ALLOWED_STORAGE_FOLDERS.has(
-          normalizedFolder
-        )
-      ) {
+      if (!ALLOWED_STORAGE_FOLDERS.has(normalizedFolder)) {
         return res.status(400).json({
           error: 'Invalid storage folder.',
-          allowedFolders: Array.from(
-            ALLOWED_STORAGE_FOLDERS
-          )
+          allowedFolders: Array.from(ALLOWED_STORAGE_FOLDERS)
         });
       }
 
-      if (
-        fileSize !== undefined &&
-        fileSize !== null
-      ) {
+      if (fileSize !== undefined && fileSize !== null) {
         const numericSize = Number(fileSize);
 
         if (
@@ -397,12 +655,11 @@ app.post(
 
       const userId = req.authUser.id;
 
-      const objectKey =
-        createStorageObjectKey(
-          userId,
-          normalizedFolder,
-          fileName
-        );
+      const objectKey = createStorageObjectKey(
+        userId,
+        normalizedFolder,
+        fileName
+      );
 
       const command = new PutObjectCommand({
         Bucket: process.env.B2_BUCKET,
@@ -431,10 +688,7 @@ app.post(
         folder: normalizedFolder
       });
     } catch (error) {
-      console.error(
-        '❌ B2 upload URL error:',
-        error
-      );
+      console.error('❌ B2 upload URL error:', error);
 
       return res.status(500).json({
         error: 'Unable to create B2 upload URL.',
@@ -456,17 +710,13 @@ app.post(
     try {
       const { objectKey } = req.body || {};
 
-      if (
-        !objectKey ||
-        typeof objectKey !== 'string'
-      ) {
+      if (!objectKey || typeof objectKey !== 'string') {
         return res.status(400).json({
           error: 'Missing objectKey.'
         });
       }
 
-      const parsed =
-        parseStorageObjectKey(objectKey);
+      const parsed = parseStorageObjectKey(objectKey);
 
       if (!parsed) {
         return res.status(400).json({
@@ -474,48 +724,37 @@ app.post(
         });
       }
 
-      if (
-        parsed.ownerId !==
-        req.authUser.id
-      ) {
+      if (parsed.ownerId !== req.authUser.id) {
         return res.status(403).json({
-          error:
-            'You do not have permission to access this object.',
+          error: 'You do not have permission to access this object.',
           code: 'OBJECT_ACCESS_DENIED'
         });
       }
 
-      const command =
-        new GetObjectCommand({
-          Bucket: process.env.B2_BUCKET,
-          Key: parsed.normalizedKey
-        });
+      const command = new GetObjectCommand({
+        Bucket: process.env.B2_BUCKET,
+        Key: parsed.normalizedKey
+      });
 
-      const downloadUrl =
-        await getSignedUrl(
-          b2,
-          command,
-          {
-            expiresIn: 900
-          }
-        );
+      const downloadUrl = await getSignedUrl(
+        b2,
+        command,
+        {
+          expiresIn: 900
+        }
+      );
 
       return res.json({
         success: true,
         downloadUrl,
-        objectKey:
-          parsed.normalizedKey,
+        objectKey: parsed.normalizedKey,
         expiresIn: 900
       });
     } catch (error) {
-      console.error(
-        '❌ B2 download URL error:',
-        error
-      );
+      console.error('❌ B2 download URL error:', error);
 
       return res.status(500).json({
-        error:
-          'Unable to create B2 download URL.',
+        error: 'Unable to create B2 download URL.',
         details: error.message
       });
     }
@@ -534,17 +773,13 @@ app.delete(
     try {
       const { objectKey } = req.body || {};
 
-      if (
-        !objectKey ||
-        typeof objectKey !== 'string'
-      ) {
+      if (!objectKey || typeof objectKey !== 'string') {
         return res.status(400).json({
           error: 'Missing objectKey.'
         });
       }
 
-      const parsed =
-        parseStorageObjectKey(objectKey);
+      const parsed = parseStorageObjectKey(objectKey);
 
       if (!parsed) {
         return res.status(400).json({
@@ -552,13 +787,9 @@ app.delete(
         });
       }
 
-      if (
-        parsed.ownerId !==
-        req.authUser.id
-      ) {
+      if (parsed.ownerId !== req.authUser.id) {
         return res.status(403).json({
-          error:
-            'You do not have permission to delete this object.',
+          error: 'You do not have permission to delete this object.',
           code: 'OBJECT_DELETE_DENIED'
         });
       }
@@ -573,18 +804,13 @@ app.delete(
       return res.json({
         success: true,
         deleted: true,
-        objectKey:
-          parsed.normalizedKey
+        objectKey: parsed.normalizedKey
       });
     } catch (error) {
-      console.error(
-        '❌ B2 delete error:',
-        error
-      );
+      console.error('❌ B2 delete error:', error);
 
       return res.status(500).json({
-        error:
-          'Unable to delete B2 object.',
+        error: 'Unable to delete B2 object.',
         details: error.message
       });
     }
@@ -593,233 +819,386 @@ app.delete(
 
 /* =========================================================
    VIDEO / AUDIO MERGE
+   B2 SOURCE OBJECT -> FFmpeg -> B2 FINAL MP4
 ========================================================= */
 
-const mergeVideoHandler = async (
-  req,
-  res
-) => {
-  const {
-    videoUrl,
-    audioUrl
-  } = req.body || {};
-
-  if (!videoUrl) {
-    return res.status(400).json({
-      error:
-        'Missing source videoUrl field.'
-    });
-  }
-
-  if (!isHttpUrl(videoUrl)) {
-    return res.status(400).json({
-      error:
-        'Invalid videoUrl. HTTP or HTTPS URL required.'
-    });
-  }
-
-  if (
-    audioUrl !== undefined &&
-    audioUrl !== null &&
-    audioUrl !== '' &&
-    !isHttpUrl(String(audioUrl))
-  ) {
-    return res.status(400).json({
-      error:
-        'Invalid audioUrl. HTTP or HTTPS URL required.'
-    });
-  }
-
-  const outputFilename =
-    `merged_${Date.now()}_${Math.floor(
-      Math.random() * 1000
-    )}.mp4`;
-
-  const outputPath =
-    path.join(
-      os.tmpdir(),
-      outputFilename
-    );
-
-  let responseFinished = false;
-
-  const cleanupOutput = () => {
-    try {
-      if (fs.existsSync(outputPath)) {
-        fs.unlinkSync(outputPath);
-      }
-    } catch (cleanupError) {
-      console.error(
-        '❌ Temporary FFmpeg cleanup failed:',
-        cleanupError.message
-      );
-    }
-  };
-
-  const sendProcessingError = (
-    status,
-    message
-  ) => {
-    if (
-      responseFinished ||
-      res.headersSent
-    ) {
-      return;
-    }
-
-    responseFinished = true;
-
-    return res.status(status).json({
-      error: message
-    });
-  };
+const mergeVideoHandler = async (req, res) => {
+  let sourcePath = null;
+  let audioPath = null;
+  let outputPath = null;
 
   try {
-    let command = ffmpeg()
-      .input(videoUrl)
-      .inputOptions([
-        '-protocol_whitelist',
-        'file,http,https,tcp,tls,crypto',
-        '-fflags',
-        '+genpts'
-      ]);
-
-    const hasCustomAudio =
-      audioUrl &&
-      !['null', 'undefined'].includes(
-        String(audioUrl)
-          .trim()
-          .toLowerCase()
-      );
-
-    if (hasCustomAudio) {
-      console.log(
-        '🎵 Custom audio detected. Merging audio into video.'
-      );
-
-      command = command
-        .input(audioUrl)
-        .inputOptions([
-          '-protocol_whitelist',
-          'file,http,https,tcp,tls,crypto',
-          '-user_agent',
-          'Mozilla/5.0'
-        ]);
-
-      command.outputOptions([
-        '-c:v',
-        'copy',
-        '-c:a',
-        'aac',
-        '-b:a',
-        '128k',
-        '-map',
-        '0:v:0',
-        '-map',
-        '1:a:0',
-        '-map_metadata',
-        '-1',
-        '-movflags',
-        '+faststart',
-        '-shortest'
-      ]);
-    } else {
-      console.log(
-        '🗣️ No custom audio supplied. Copying original media tracks.'
-      );
-
-      command.outputOptions([
-        '-c:v',
-        'copy',
-        '-c:a',
-        'copy',
-        '-movflags',
-        '+faststart'
-      ]);
+    if (!req.authUser?.id) {
+      return res.status(401).json({
+        error: 'Authentication required.',
+        code: 'AUTH_REQUIRED'
+      });
     }
 
-    command
-      .toFormat('mp4')
-      .on('start', () => {
-        console.log(
-          `🎬 Started video processing: ${outputFilename}`
+    if (!b2Configured || !b2) {
+      return res.status(503).json({
+        error: 'Backblaze B2 storage is not configured.',
+        code: 'B2_NOT_CONFIGURED'
+      });
+    }
+
+    const body = req.body || {};
+
+    const sourceObjectKey =
+      body.sourceObjectKey ||
+      body.videoUrl;
+
+    const audioUrl =
+      body.audioUrl ||
+      null;
+
+    const videoVolume = Number.isFinite(Number(body.videoVolume))
+      ? Number(body.videoVolume)
+      : 1;
+
+    const musicVolume = Number.isFinite(Number(body.musicVolume))
+      ? Number(body.musicVolume)
+      : 1;
+
+    const audioEnhancement =
+      typeof body.audioEnhancement === 'string'
+        ? body.audioEnhancement.trim().toLowerCase()
+        : 'none';
+
+    const filter =
+      typeof body.filter === 'string'
+        ? body.filter.trim().toLowerCase()
+        : 'none';
+
+    if (!sourceObjectKey) {
+      return res.status(400).json({
+        error: 'Missing source videoUrl field.'
+      });
+    }
+
+    if (typeof sourceObjectKey !== 'string') {
+      return res.status(400).json({
+        error: 'Invalid source videoUrl field.'
+      });
+    }
+
+    /*
+     * The frontend sends the B2 object key:
+     *
+     * videos/user-id/temporary-file.webm
+     *
+     * It is NOT an HTTP URL.
+     */
+
+    const parsedSource = parseStorageObjectKey(
+      sourceObjectKey
+    );
+
+    if (!parsedSource) {
+      return res.status(400).json({
+        error: 'Invalid source video object key.'
+      });
+    }
+
+    if (parsedSource.folder !== 'videos') {
+      return res.status(400).json({
+        error: 'Source video must be stored in the videos folder.'
+      });
+    }
+
+    if (parsedSource.ownerId !== req.authUser.id) {
+      return res.status(403).json({
+        error: 'You do not have permission to process this video.',
+        code: 'SOURCE_ACCESS_DENIED'
+      });
+    }
+
+    if (
+      audioUrl !== null &&
+      audioUrl !== '' &&
+      !isHttpUrl(String(audioUrl))
+    ) {
+      return res.status(400).json({
+        error: 'Invalid audioUrl. HTTP or HTTPS URL required.'
+      });
+    }
+
+    const allowedEnhancements = new Set([
+      'none',
+      'crystal_voice',
+      'studio_master',
+      'bass_boost'
+    ]);
+
+    const safeEnhancement = allowedEnhancements.has(
+      audioEnhancement
+    )
+      ? audioEnhancement
+      : 'none';
+
+    const safeVideoVolume = Math.max(
+      0,
+      Math.min(2, videoVolume)
+    );
+
+    const safeMusicVolume = Math.max(
+      0,
+      Math.min(2, musicVolume)
+    );
+
+    const uniqueId = crypto.randomUUID();
+
+    const sourceExtension =
+      getExtension(parsedSource.normalizedKey) ||
+      '.webm';
+
+    sourcePath = path.join(
+      os.tmpdir(),
+      `made-source-${Date.now()}-${uniqueId}${sourceExtension}`
+    );
+
+    outputPath = path.join(
+      os.tmpdir(),
+      `made-final-${Date.now()}-${uniqueId}.mp4`
+    );
+
+    console.log('🎥 Video merge request received.');
+    console.log(`👤 User: ${req.authUser.id}`);
+    console.log(`📦 Source object: ${parsedSource.normalizedKey}`);
+    console.log(`🎵 Audio supplied: ${Boolean(audioUrl)}`);
+    console.log(`🔊 Video volume: ${safeVideoVolume}`);
+    console.log(`🎵 Music volume: ${safeMusicVolume}`);
+    console.log(`🎚️ Enhancement: ${safeEnhancement}`);
+    console.log(`🎨 Filter: ${filter}`);
+
+    /* -------------------------------------------------------
+       DOWNLOAD SOURCE VIDEO FROM PRIVATE B2
+    ------------------------------------------------------- */
+
+    console.log('⬇️ Downloading source video from B2...');
+
+    await downloadB2ObjectToFile(
+      parsedSource.normalizedKey,
+      sourcePath
+    );
+
+    if (!fs.existsSync(sourcePath)) {
+      throw new Error(
+        'Source video could not be downloaded from B2.'
+      );
+    }
+
+    const sourceStats = await fs.promises.stat(
+      sourcePath
+    );
+
+    if (sourceStats.size <= 0) {
+      throw new Error(
+        'Downloaded source video is empty.'
+      );
+    }
+
+    console.log(
+      `✅ Source video downloaded: ${sourceStats.size} bytes`
+    );
+
+    /* -------------------------------------------------------
+       DOWNLOAD OPTIONAL MUSIC
+    ------------------------------------------------------- */
+
+    if (
+      audioUrl &&
+      String(audioUrl).trim() &&
+      !['null', 'undefined'].includes(
+        String(audioUrl).trim().toLowerCase()
+      )
+    ) {
+      const audioId = crypto.randomUUID();
+
+      audioPath = path.join(
+        os.tmpdir(),
+        `made-audio-${Date.now()}-${audioId}.audio`
+      );
+
+      console.log('⬇️ Downloading external audio...');
+
+      await downloadRemoteAudioToFile(
+        String(audioUrl),
+        audioPath
+      );
+
+      if (!fs.existsSync(audioPath)) {
+        throw new Error(
+          'Audio file could not be downloaded.'
         );
+      }
+
+      const audioStats = await fs.promises.stat(
+        audioPath
+      );
+
+      if (audioStats.size <= 0) {
+        throw new Error(
+          'Downloaded audio file is empty.'
+        );
+      }
+
+      console.log(
+        `✅ Audio downloaded: ${audioStats.size} bytes`
+      );
+    }
+
+    /* -------------------------------------------------------
+       FFMPEG
+    ------------------------------------------------------- */
+
+    console.log('🎬 Starting FFmpeg processing...');
+
+    await processVideoWithFFmpeg({
+      sourcePath,
+      audioPath,
+      outputPath,
+      videoVolume: safeVideoVolume,
+      musicVolume: safeMusicVolume,
+      audioEnhancement: safeEnhancement,
+      filter
+    });
+
+    if (!fs.existsSync(outputPath)) {
+      throw new Error(
+        'FFmpeg completed but generated video file was not found.'
+      );
+    }
+
+    const outputStats = await fs.promises.stat(
+      outputPath
+    );
+
+    if (outputStats.size <= 0) {
+      throw new Error(
+        'Generated video file is empty.'
+      );
+    }
+
+    console.log(
+      `✅ Final MP4 generated: ${outputStats.size} bytes`
+    );
+
+    /* -------------------------------------------------------
+       UPLOAD FINAL MP4 BACK TO B2
+    ------------------------------------------------------- */
+
+    const finalFileName =
+      `made-final-${Date.now()}-${uniqueId}.mp4`;
+
+    const finalObjectKey = createStorageObjectKey(
+      req.authUser.id,
+      'videos',
+      finalFileName
+    );
+
+    console.log(
+      `⬆️ Uploading final MP4 to B2: ${finalObjectKey}`
+    );
+
+    const outputStream = fs.createReadStream(
+      outputPath
+    );
+
+    await b2.send(
+      new PutObjectCommand({
+        Bucket: process.env.B2_BUCKET,
+        Key: finalObjectKey,
+        Body: outputStream,
+        ContentType: 'video/mp4',
+        ContentLength: outputStats.size
       })
-      .on('error', (err) => {
-        console.error(
-          '❌ FFmpeg error:',
-          err.message
-        );
+    );
 
-        cleanupOutput();
+    console.log(
+      '☁️ Final MP4 uploaded successfully to B2.'
+    );
 
-        sendProcessingError(
-          500,
-          `Video generation pipeline encountered an issue: ${err.message}`
-        );
-      })
-      .on('end', () => {
-        if (
-          responseFinished ||
-          res.headersSent
-        ) {
-          cleanupOutput();
-          return;
-        }
-
-        if (
-          !fs.existsSync(outputPath)
-        ) {
-          return sendProcessingError(
-            500,
-            'FFmpeg completed but the generated video file was not found.'
-          );
-        }
-
-        console.log(
-          '✅ Video generated successfully. Starting download.'
-        );
-
-        responseFinished = true;
-
-        res.download(
-          outputPath,
-          'Mpade_Export.mp4',
-          (downloadError) => {
-            if (downloadError) {
-              console.error(
-                '❌ Error during file transfer:',
-                downloadError.message
-              );
-            }
-
-            cleanupOutput();
-          }
-        );
-      })
-      .save(outputPath);
+    return res.status(200).json({
+      success: true,
+      objectKey: finalObjectKey,
+      folder: 'videos',
+      contentType: 'video/mp4',
+      size: outputStats.size
+    });
   } catch (error) {
     console.error(
-      '❌ Failed to initialize FFmpeg pipeline:',
+      '❌ Video merge pipeline failed:',
       error
     );
 
-    cleanupOutput();
+    const message = String(
+      error?.message || ''
+    );
 
-    return sendProcessingError(
-      500,
-      'Unable to initialize video processing pipeline.'
+    if (
+      message.includes('NoSuchKey') ||
+      message.includes('The specified key does not exist') ||
+      message.includes('source video could not be downloaded')
+    ) {
+      return res.status(404).json({
+        error: 'Source video was not found in B2.',
+        code: 'SOURCE_VIDEO_NOT_FOUND'
+      });
+    }
+
+    if (
+      message.includes('Audio download failed') ||
+      message.includes('Audio response contained no body') ||
+      message.includes('Invalid audio URL')
+    ) {
+      return res.status(422).json({
+        error: message,
+        code: 'AUDIO_DOWNLOAD_FAILED'
+      });
+    }
+
+    if (
+      message.toLowerCase().includes('ffmpeg') ||
+      message.includes('Invalid data found when processing input') ||
+      message.includes('Output file')
+    ) {
+      return res.status(422).json({
+        error: `Video processing failed: ${message}`,
+        code: 'FFMPEG_PROCESSING_FAILED'
+      });
+    }
+
+    return res.status(500).json({
+      error: 'Unable to process video.',
+      code: 'VIDEO_PROCESSING_FAILED',
+      details: message
+    });
+  } finally {
+    cleanupTempFiles(
+      sourcePath,
+      audioPath,
+      outputPath
     );
   }
 };
 
+/*
+ * Both routes are kept so the existing frontend or any older
+ * frontend implementation can continue working.
+ */
+
 app.post(
-  '/api/merge-video',
+  '/api/storage/merge-video',
+  authenticateSupabaseUser,
+  requireB2,
   mergeVideoHandler
 );
 
 app.post(
-  '/api/storage/merge-video',
+  '/api/merge-video',
+  authenticateSupabaseUser,
+  requireB2,
   mergeVideoHandler
 );
 
@@ -843,18 +1222,13 @@ const resolveSocket = (value) => {
   const stringValue = String(value);
 
   const directSocket =
-    io.sockets.sockets.get(
-      stringValue
-    );
+    io.sockets.sockets.get(stringValue);
 
   if (directSocket) {
     return directSocket.id;
   }
 
-  return (
-    activeUsers.get(stringValue) ||
-    null
-  );
+  return activeUsers.get(stringValue) || null;
 };
 
 const rememberCallRoom = (
@@ -1136,14 +1510,13 @@ io.on('connection', (socket) => {
 
       /*
        * IMPORTANT:
-       * Do NOT emit incoming_call_signal here.
+       * Do not emit incoming_call_signal here.
        *
-       * The initial incoming-call notification
+       * The initial incoming call notification
        * is sent only by initiate_call_signal.
        *
-       * This prevents repeated incoming-call
-       * notifications when a component reconnects,
-       * remounts, or rejoins the call room.
+       * This prevents duplicate notifications when
+       * a call component reconnects or remounts.
        */
 
       void targetPeerId;
