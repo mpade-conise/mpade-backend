@@ -6,14 +6,12 @@ const fs = require('fs');
 const os = require('os');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
-
 const {
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand
 } = require('@aws-sdk/client-s3');
-
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const ffmpeg = require('fluent-ffmpeg');
 
@@ -47,7 +45,14 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
+
+/*
+ * IMPORTANT:
+ * Express 5 / newer path-to-regexp versions do not accept '*'
+ * here. The regex route handles all OPTIONS requests safely.
+ */
+app.options(/.*/, cors(corsOptions));
+
 app.use(express.json({ limit: '2mb' }));
 
 /* =========================================================
@@ -60,7 +65,9 @@ if (fs.existsSync(systemFfmpegPath)) {
   ffmpeg.setFfmpegPath(systemFfmpegPath);
   console.log(`🚀 FFmpeg mapped to ${systemFfmpegPath}`);
 } else {
-  console.log('ℹ️ System FFmpeg not found; using fluent-ffmpeg default configuration.');
+  console.log(
+    'ℹ️ System FFmpeg not found; using fluent-ffmpeg default configuration.'
+  );
 }
 
 /* =========================================================
@@ -170,7 +177,10 @@ const authenticateSupabaseUser = async (req, res, next) => {
 
     return next();
   } catch (error) {
-    console.error('❌ Supabase authentication error:', error.message);
+    console.error(
+      '❌ Supabase authentication error:',
+      error.message
+    );
 
     return res.status(500).json({
       error: 'Authentication service temporarily unavailable.',
@@ -223,11 +233,16 @@ const isValidContentType = (contentType) => {
     return false;
   }
 
-  return /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(contentType);
+  return /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(
+    contentType
+  );
 };
 
 const createStorageObjectKey = (userId, folder, fileName) => {
-  const safeUserId = String(userId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+  const safeUserId = String(userId || '').replace(
+    /[^a-zA-Z0-9_-]/g,
+    ''
+  );
 
   const safeFolder = String(folder || '')
     .toLowerCase()
@@ -309,7 +324,9 @@ const safeUnlink = (filePath) => {
       fs.unlinkSync(filePath);
     }
   } catch (error) {
-    console.warn(`⚠️ Could not remove temporary file ${filePath}: ${error.message}`);
+    console.warn(
+      `⚠️ Could not remove temporary file ${filePath}: ${error.message}`
+    );
   }
 };
 
@@ -323,7 +340,10 @@ const cleanupTempFiles = (...filePaths) => {
    DOWNLOAD PRIVATE B2 OBJECT
 ========================================================= */
 
-const downloadB2ObjectToFile = async (objectKey, outputPath) => {
+const downloadB2ObjectToFile = async (
+  objectKey,
+  outputPath
+) => {
   const parsed = parseStorageObjectKey(objectKey);
 
   if (!parsed) {
@@ -342,30 +362,50 @@ const downloadB2ObjectToFile = async (objectKey, outputPath) => {
   }
 
   if (typeof response.Body.pipe === 'function') {
-    await pipeline(response.Body, fs.createWriteStream(outputPath));
+    await pipeline(
+      response.Body,
+      fs.createWriteStream(outputPath)
+    );
+
     return;
   }
 
-  if (typeof response.Body.transformToByteArray === 'function') {
+  if (
+    typeof response.Body.transformToByteArray === 'function'
+  ) {
     const bytes = await response.Body.transformToByteArray();
-    await fs.promises.writeFile(outputPath, Buffer.from(bytes));
+
+    await fs.promises.writeFile(
+      outputPath,
+      Buffer.from(bytes)
+    );
+
     return;
   }
 
-  throw new Error('Unsupported B2 response body type.');
+  throw new Error(
+    'Unsupported B2 response body type.'
+  );
 };
 
 /* =========================================================
    DOWNLOAD REMOTE AUDIO
 ========================================================= */
 
-const downloadRemoteAudioToFile = async (audioUrl, outputPath) => {
+const downloadRemoteAudioToFile = async (
+  audioUrl,
+  outputPath
+) => {
   if (!isHttpUrl(audioUrl)) {
     throw new Error('Invalid audio URL.');
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60000);
+
+  const timeout = setTimeout(
+    () => controller.abort(),
+    60000
+  );
 
   try {
     const response = await fetch(audioUrl, {
@@ -377,17 +417,29 @@ const downloadRemoteAudioToFile = async (audioUrl, outputPath) => {
     });
 
     if (!response.ok) {
-      throw new Error(`Audio download failed with HTTP ${response.status}.`);
+      throw new Error(
+        `Audio download failed with HTTP ${response.status}.`
+      );
     }
 
     if (!response.body) {
-      throw new Error('Audio response contained no body.');
+      throw new Error(
+        'Audio response contained no body.'
+      );
     }
 
     await pipeline(
       Readable.fromWeb(response.body),
       fs.createWriteStream(outputPath)
     );
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error(
+        'Audio download timed out.'
+      );
+    }
+
+    throw error;
   } finally {
     clearTimeout(timeout);
   }
@@ -428,22 +480,32 @@ const processVideoWithFFmpeg = ({
     );
 
     if (filter && typeof filter === 'string') {
-      const normalizedFilter = filter.trim().toLowerCase();
+      const normalizedFilter = filter
+        .trim()
+        .toLowerCase();
 
       const videoFilters = {
         none: null,
         normal: null,
         grayscale: 'hue=s=0',
-        sepia: 'colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131',
-        vivid: 'eq=contrast=1.12:saturation=1.25:brightness=0.02',
-        bright: 'eq=brightness=0.08:contrast=1.05',
-        dark: 'eq=brightness=-0.08:contrast=1.05',
-        warm: 'colorbalance=rs=.08:gs=.03:bs=-.03',
-        cool: 'colorbalance=rs=-.03:gs=.03:bs=.08'
+        sepia:
+          'colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131',
+        vivid:
+          'eq=contrast=1.12:saturation=1.25:brightness=0.02',
+        bright:
+          'eq=brightness=0.08:contrast=1.05',
+        dark:
+          'eq=brightness=-0.08:contrast=1.05',
+        warm:
+          'colorbalance=rs=.08:gs=.03:bs=-.03',
+        cool:
+          'colorbalance=rs=-.03:gs=.03:bs=.08'
       };
 
       if (videoFilters[normalizedFilter]) {
-        filters.push(videoFilters[normalizedFilter]);
+        filters.push(
+          videoFilters[normalizedFilter]
+        );
       }
     }
 
@@ -470,7 +532,9 @@ const processVideoWithFFmpeg = ({
         audioFilters.push(
           '[voice_processed][music_audio]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mixed_audio]'
         );
-      } else if (audioEnhancement === 'studio_master') {
+      } else if (
+        audioEnhancement === 'studio_master'
+      ) {
         audioFilters.push(
           '[original_audio]highpass=f=50,lowpass=f=16000,acompressor=threshold=-16dB:ratio=2.5:attack=15:release=200,equalizer=f=3000:t=q:w=1:g=2[voice_processed]'
         );
@@ -478,7 +542,9 @@ const processVideoWithFFmpeg = ({
         audioFilters.push(
           '[voice_processed][music_audio]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mixed_audio]'
         );
-      } else if (audioEnhancement === 'bass_boost') {
+      } else if (
+        audioEnhancement === 'bass_boost'
+      ) {
         audioFilters.push(
           '[original_audio]bass=g=5:f=100[voice_processed]'
         );
@@ -492,7 +558,10 @@ const processVideoWithFFmpeg = ({
         );
       }
 
-      command.complexFilter(audioFilters, 'mixed_audio');
+      command.complexFilter(
+        audioFilters,
+        'mixed_audio'
+      );
 
       command.outputOptions([
         '-map',
@@ -551,21 +620,31 @@ const processVideoWithFFmpeg = ({
       .on('progress', (progress) => {
         if (progress.percent !== undefined) {
           console.log(
-            `🎬 FFmpeg progress: ${Number(progress.percent).toFixed(1)}%`
+            `🎬 FFmpeg progress: ${Number(
+              progress.percent
+            ).toFixed(1)}%`
           );
         }
       })
       .on('error', (error, stdout, stderr) => {
-        console.error('❌ FFmpeg processing error:', error.message);
+        console.error(
+          '❌ FFmpeg processing error:',
+          error.message
+        );
 
         if (stderr) {
-          console.error(stderr.slice(-4000));
+          console.error(
+            stderr.slice(-4000)
+          );
         }
 
         reject(error);
       })
       .on('end', () => {
-        console.log('✅ FFmpeg processing completed.');
+        console.log(
+          '✅ FFmpeg processing completed.'
+        );
+
         resolve();
       })
       .save(outputPath);
@@ -629,16 +708,26 @@ app.post(
         });
       }
 
-      const normalizedFolder = String(folder).toLowerCase();
+      const normalizedFolder = String(folder)
+        .toLowerCase();
 
-      if (!ALLOWED_STORAGE_FOLDERS.has(normalizedFolder)) {
+      if (
+        !ALLOWED_STORAGE_FOLDERS.has(
+          normalizedFolder
+        )
+      ) {
         return res.status(400).json({
           error: 'Invalid storage folder.',
-          allowedFolders: Array.from(ALLOWED_STORAGE_FOLDERS)
+          allowedFolders: Array.from(
+            ALLOWED_STORAGE_FOLDERS
+          )
         });
       }
 
-      if (fileSize !== undefined && fileSize !== null) {
+      if (
+        fileSize !== undefined &&
+        fileSize !== null
+      ) {
         const numericSize = Number(fileSize);
 
         if (
@@ -655,11 +744,12 @@ app.post(
 
       const userId = req.authUser.id;
 
-      const objectKey = createStorageObjectKey(
-        userId,
-        normalizedFolder,
-        fileName
-      );
+      const objectKey =
+        createStorageObjectKey(
+          userId,
+          normalizedFolder,
+          fileName
+        );
 
       const command = new PutObjectCommand({
         Bucket: process.env.B2_BUCKET,
@@ -688,7 +778,10 @@ app.post(
         folder: normalizedFolder
       });
     } catch (error) {
-      console.error('❌ B2 upload URL error:', error);
+      console.error(
+        '❌ B2 upload URL error:',
+        error
+      );
 
       return res.status(500).json({
         error: 'Unable to create B2 upload URL.',
@@ -710,13 +803,17 @@ app.post(
     try {
       const { objectKey } = req.body || {};
 
-      if (!objectKey || typeof objectKey !== 'string') {
+      if (
+        !objectKey ||
+        typeof objectKey !== 'string'
+      ) {
         return res.status(400).json({
           error: 'Missing objectKey.'
         });
       }
 
-      const parsed = parseStorageObjectKey(objectKey);
+      const parsed =
+        parseStorageObjectKey(objectKey);
 
       if (!parsed) {
         return res.status(400).json({
@@ -724,38 +821,53 @@ app.post(
         });
       }
 
-      if (parsed.ownerId !== req.authUser.id) {
+      if (
+        parsed.ownerId !==
+        req.authUser.id
+      ) {
         return res.status(403).json({
-          error: 'You do not have permission to access this object.',
-          code: 'OBJECT_ACCESS_DENIED'
+          error:
+            'You do not have permission to access this object.',
+          code:
+            'OBJECT_ACCESS_DENIED'
         });
       }
 
-      const command = new GetObjectCommand({
-        Bucket: process.env.B2_BUCKET,
-        Key: parsed.normalizedKey
-      });
+      const command =
+        new GetObjectCommand({
+          Bucket:
+            process.env.B2_BUCKET,
+          Key:
+            parsed.normalizedKey
+        });
 
-      const downloadUrl = await getSignedUrl(
-        b2,
-        command,
-        {
-          expiresIn: 900
-        }
-      );
+      const downloadUrl =
+        await getSignedUrl(
+          b2,
+          command,
+          {
+            expiresIn: 900
+          }
+        );
 
       return res.json({
         success: true,
         downloadUrl,
-        objectKey: parsed.normalizedKey,
+        objectKey:
+          parsed.normalizedKey,
         expiresIn: 900
       });
     } catch (error) {
-      console.error('❌ B2 download URL error:', error);
+      console.error(
+        '❌ B2 download URL error:',
+        error
+      );
 
       return res.status(500).json({
-        error: 'Unable to create B2 download URL.',
-        details: error.message
+        error:
+          'Unable to create B2 download URL.',
+        details:
+          error.message
       });
     }
   }
@@ -771,15 +883,22 @@ app.delete(
   requireB2,
   async (req, res) => {
     try {
-      const { objectKey } = req.body || {};
+      const { objectKey } =
+        req.body || {};
 
-      if (!objectKey || typeof objectKey !== 'string') {
+      if (
+        !objectKey ||
+        typeof objectKey !== 'string'
+      ) {
         return res.status(400).json({
           error: 'Missing objectKey.'
         });
       }
 
-      const parsed = parseStorageObjectKey(objectKey);
+      const parsed =
+        parseStorageObjectKey(
+          objectKey
+        );
 
       if (!parsed) {
         return res.status(400).json({
@@ -787,31 +906,44 @@ app.delete(
         });
       }
 
-      if (parsed.ownerId !== req.authUser.id) {
+      if (
+        parsed.ownerId !==
+        req.authUser.id
+      ) {
         return res.status(403).json({
-          error: 'You do not have permission to delete this object.',
-          code: 'OBJECT_DELETE_DENIED'
+          error:
+            'You do not have permission to delete this object.',
+          code:
+            'OBJECT_DELETE_DENIED'
         });
       }
 
       await b2.send(
         new DeleteObjectCommand({
-          Bucket: process.env.B2_BUCKET,
-          Key: parsed.normalizedKey
+          Bucket:
+            process.env.B2_BUCKET,
+          Key:
+            parsed.normalizedKey
         })
       );
 
       return res.json({
         success: true,
         deleted: true,
-        objectKey: parsed.normalizedKey
+        objectKey:
+          parsed.normalizedKey
       });
     } catch (error) {
-      console.error('❌ B2 delete error:', error);
+      console.error(
+        '❌ B2 delete error:',
+        error
+      );
 
       return res.status(500).json({
-        error: 'Unable to delete B2 object.',
-        details: error.message
+        error:
+          'Unable to delete B2 object.',
+        details:
+          error.message
       });
     }
   }
@@ -819,10 +951,22 @@ app.delete(
 
 /* =========================================================
    VIDEO / AUDIO MERGE
-   B2 SOURCE OBJECT -> FFmpeg -> B2 FINAL MP4
+
+   PRIVATE B2 SOURCE
+        ↓
+   RENDER TEMP FILE
+        ↓
+      FFMPEG
+        ↓
+   FINAL MP4 TEMP FILE
+        ↓
+      PRIVATE B2
 ========================================================= */
 
-const mergeVideoHandler = async (req, res) => {
+const mergeVideoHandler = async (
+  req,
+  res
+) => {
   let sourcePath = null;
   let audioPath = null;
   let outputPath = null;
@@ -830,15 +974,19 @@ const mergeVideoHandler = async (req, res) => {
   try {
     if (!req.authUser?.id) {
       return res.status(401).json({
-        error: 'Authentication required.',
-        code: 'AUTH_REQUIRED'
+        error:
+          'Authentication required.',
+        code:
+          'AUTH_REQUIRED'
       });
     }
 
     if (!b2Configured || !b2) {
       return res.status(503).json({
-        error: 'Backblaze B2 storage is not configured.',
-        code: 'B2_NOT_CONFIGURED'
+        error:
+          'Backblaze B2 storage is not configured.',
+        code:
+          'B2_NOT_CONFIGURED'
       });
     }
 
@@ -849,108 +997,141 @@ const mergeVideoHandler = async (req, res) => {
       body.videoUrl;
 
     const audioUrl =
-      body.audioUrl ||
-      null;
+      body.audioUrl || null;
 
-    const videoVolume = Number.isFinite(Number(body.videoVolume))
-      ? Number(body.videoVolume)
-      : 1;
+    const videoVolume =
+      Number.isFinite(
+        Number(body.videoVolume)
+      )
+        ? Number(body.videoVolume)
+        : 1;
 
-    const musicVolume = Number.isFinite(Number(body.musicVolume))
-      ? Number(body.musicVolume)
-      : 1;
+    const musicVolume =
+      Number.isFinite(
+        Number(body.musicVolume)
+      )
+        ? Number(body.musicVolume)
+        : 1;
 
     const audioEnhancement =
-      typeof body.audioEnhancement === 'string'
-        ? body.audioEnhancement.trim().toLowerCase()
+      typeof body.audioEnhancement ===
+      'string'
+        ? body.audioEnhancement
+            .trim()
+            .toLowerCase()
         : 'none';
 
     const filter =
       typeof body.filter === 'string'
-        ? body.filter.trim().toLowerCase()
+        ? body.filter
+            .trim()
+            .toLowerCase()
         : 'none';
 
     if (!sourceObjectKey) {
       return res.status(400).json({
-        error: 'Missing source videoUrl field.'
+        error:
+          'Missing source videoUrl field.'
       });
     }
 
-    if (typeof sourceObjectKey !== 'string') {
+    if (
+      typeof sourceObjectKey !==
+      'string'
+    ) {
       return res.status(400).json({
-        error: 'Invalid source videoUrl field.'
+        error:
+          'Invalid source videoUrl field.'
       });
     }
 
-    /*
-     * The frontend sends the B2 object key:
-     *
-     * videos/user-id/temporary-file.webm
-     *
-     * It is NOT an HTTP URL.
-     */
-
-    const parsedSource = parseStorageObjectKey(
-      sourceObjectKey
-    );
+    const parsedSource =
+      parseStorageObjectKey(
+        sourceObjectKey
+      );
 
     if (!parsedSource) {
       return res.status(400).json({
-        error: 'Invalid source video object key.'
+        error:
+          'Invalid source video object key.'
       });
     }
 
-    if (parsedSource.folder !== 'videos') {
+    if (
+      parsedSource.folder !==
+      'videos'
+    ) {
       return res.status(400).json({
-        error: 'Source video must be stored in the videos folder.'
+        error:
+          'Source video must be stored in the videos folder.'
       });
     }
 
-    if (parsedSource.ownerId !== req.authUser.id) {
+    if (
+      parsedSource.ownerId !==
+      req.authUser.id
+    ) {
       return res.status(403).json({
-        error: 'You do not have permission to process this video.',
-        code: 'SOURCE_ACCESS_DENIED'
+        error:
+          'You do not have permission to process this video.',
+        code:
+          'SOURCE_ACCESS_DENIED'
       });
     }
 
     if (
       audioUrl !== null &&
       audioUrl !== '' &&
-      !isHttpUrl(String(audioUrl))
+      !isHttpUrl(
+        String(audioUrl)
+      )
     ) {
       return res.status(400).json({
-        error: 'Invalid audioUrl. HTTP or HTTPS URL required.'
+        error:
+          'Invalid audioUrl. HTTP or HTTPS URL required.'
       });
     }
 
-    const allowedEnhancements = new Set([
-      'none',
-      'crystal_voice',
-      'studio_master',
-      'bass_boost'
-    ]);
+    const allowedEnhancements =
+      new Set([
+        'none',
+        'crystal_voice',
+        'studio_master',
+        'bass_boost'
+      ]);
 
-    const safeEnhancement = allowedEnhancements.has(
-      audioEnhancement
-    )
-      ? audioEnhancement
-      : 'none';
+    const safeEnhancement =
+      allowedEnhancements.has(
+        audioEnhancement
+      )
+        ? audioEnhancement
+        : 'none';
 
-    const safeVideoVolume = Math.max(
-      0,
-      Math.min(2, videoVolume)
-    );
+    const safeVideoVolume =
+      Math.max(
+        0,
+        Math.min(
+          2,
+          videoVolume
+        )
+      );
 
-    const safeMusicVolume = Math.max(
-      0,
-      Math.min(2, musicVolume)
-    );
+    const safeMusicVolume =
+      Math.max(
+        0,
+        Math.min(
+          2,
+          musicVolume
+        )
+      );
 
-    const uniqueId = crypto.randomUUID();
+    const uniqueId =
+      crypto.randomUUID();
 
     const sourceExtension =
-      getExtension(parsedSource.normalizedKey) ||
-      '.webm';
+      getExtension(
+        parsedSource.normalizedKey
+      ) || '.webm';
 
     sourcePath = path.join(
       os.tmpdir(),
@@ -962,20 +1143,45 @@ const mergeVideoHandler = async (req, res) => {
       `made-final-${Date.now()}-${uniqueId}.mp4`
     );
 
-    console.log('🎥 Video merge request received.');
-    console.log(`👤 User: ${req.authUser.id}`);
-    console.log(`📦 Source object: ${parsedSource.normalizedKey}`);
-    console.log(`🎵 Audio supplied: ${Boolean(audioUrl)}`);
-    console.log(`🔊 Video volume: ${safeVideoVolume}`);
-    console.log(`🎵 Music volume: ${safeMusicVolume}`);
-    console.log(`🎚️ Enhancement: ${safeEnhancement}`);
-    console.log(`🎨 Filter: ${filter}`);
+    console.log(
+      '🎥 Video merge request received.'
+    );
+
+    console.log(
+      `👤 User: ${req.authUser.id}`
+    );
+
+    console.log(
+      `📦 Source object: ${parsedSource.normalizedKey}`
+    );
+
+    console.log(
+      `🎵 Audio supplied: ${Boolean(audioUrl)}`
+    );
+
+    console.log(
+      `🔊 Video volume: ${safeVideoVolume}`
+    );
+
+    console.log(
+      `🎵 Music volume: ${safeMusicVolume}`
+    );
+
+    console.log(
+      `🎚️ Enhancement: ${safeEnhancement}`
+    );
+
+    console.log(
+      `🎨 Filter: ${filter}`
+    );
 
     /* -------------------------------------------------------
        DOWNLOAD SOURCE VIDEO FROM PRIVATE B2
     ------------------------------------------------------- */
 
-    console.log('⬇️ Downloading source video from B2...');
+    console.log(
+      '⬇️ Downloading source video from B2...'
+    );
 
     await downloadB2ObjectToFile(
       parsedSource.normalizedKey,
@@ -988,9 +1194,10 @@ const mergeVideoHandler = async (req, res) => {
       );
     }
 
-    const sourceStats = await fs.promises.stat(
-      sourcePath
-    );
+    const sourceStats =
+      await fs.promises.stat(
+        sourcePath
+      );
 
     if (sourceStats.size <= 0) {
       throw new Error(
@@ -1009,18 +1216,26 @@ const mergeVideoHandler = async (req, res) => {
     if (
       audioUrl &&
       String(audioUrl).trim() &&
-      !['null', 'undefined'].includes(
-        String(audioUrl).trim().toLowerCase()
+      ![
+        'null',
+        'undefined'
+      ].includes(
+        String(audioUrl)
+          .trim()
+          .toLowerCase()
       )
     ) {
-      const audioId = crypto.randomUUID();
+      const audioId =
+        crypto.randomUUID();
 
       audioPath = path.join(
         os.tmpdir(),
         `made-audio-${Date.now()}-${audioId}.audio`
       );
 
-      console.log('⬇️ Downloading external audio...');
+      console.log(
+        '⬇️ Downloading external audio...'
+      );
 
       await downloadRemoteAudioToFile(
         String(audioUrl),
@@ -1033,9 +1248,10 @@ const mergeVideoHandler = async (req, res) => {
         );
       }
 
-      const audioStats = await fs.promises.stat(
-        audioPath
-      );
+      const audioStats =
+        await fs.promises.stat(
+          audioPath
+        );
 
       if (audioStats.size <= 0) {
         throw new Error(
@@ -1052,15 +1268,20 @@ const mergeVideoHandler = async (req, res) => {
        FFMPEG
     ------------------------------------------------------- */
 
-    console.log('🎬 Starting FFmpeg processing...');
+    console.log(
+      '🎬 Starting FFmpeg processing...'
+    );
 
     await processVideoWithFFmpeg({
       sourcePath,
       audioPath,
       outputPath,
-      videoVolume: safeVideoVolume,
-      musicVolume: safeMusicVolume,
-      audioEnhancement: safeEnhancement,
+      videoVolume:
+        safeVideoVolume,
+      musicVolume:
+        safeMusicVolume,
+      audioEnhancement:
+        safeEnhancement,
       filter
     });
 
@@ -1070,9 +1291,10 @@ const mergeVideoHandler = async (req, res) => {
       );
     }
 
-    const outputStats = await fs.promises.stat(
-      outputPath
-    );
+    const outputStats =
+      await fs.promises.stat(
+        outputPath
+      );
 
     if (outputStats.size <= 0) {
       throw new Error(
@@ -1091,27 +1313,34 @@ const mergeVideoHandler = async (req, res) => {
     const finalFileName =
       `made-final-${Date.now()}-${uniqueId}.mp4`;
 
-    const finalObjectKey = createStorageObjectKey(
-      req.authUser.id,
-      'videos',
-      finalFileName
-    );
+    const finalObjectKey =
+      createStorageObjectKey(
+        req.authUser.id,
+        'videos',
+        finalFileName
+      );
 
     console.log(
       `⬆️ Uploading final MP4 to B2: ${finalObjectKey}`
     );
 
-    const outputStream = fs.createReadStream(
-      outputPath
-    );
+    const outputStream =
+      fs.createReadStream(
+        outputPath
+      );
 
     await b2.send(
       new PutObjectCommand({
-        Bucket: process.env.B2_BUCKET,
-        Key: finalObjectKey,
-        Body: outputStream,
-        ContentType: 'video/mp4',
-        ContentLength: outputStats.size
+        Bucket:
+          process.env.B2_BUCKET,
+        Key:
+          finalObjectKey,
+        Body:
+          outputStream,
+        ContentType:
+          'video/mp4',
+        ContentLength:
+          outputStats.size
       })
     );
 
@@ -1121,10 +1350,14 @@ const mergeVideoHandler = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      objectKey: finalObjectKey,
-      folder: 'videos',
-      contentType: 'video/mp4',
-      size: outputStats.size
+      objectKey:
+        finalObjectKey,
+      folder:
+        'videos',
+      contentType:
+        'video/mp4',
+      size:
+        outputStats.size
     });
   } catch (error) {
     console.error(
@@ -1132,47 +1365,78 @@ const mergeVideoHandler = async (req, res) => {
       error
     );
 
-    const message = String(
-      error?.message || ''
-    );
+    const message =
+      String(
+        error?.message || ''
+      );
 
     if (
-      message.includes('NoSuchKey') ||
-      message.includes('The specified key does not exist') ||
-      message.includes('source video could not be downloaded')
+      message.includes(
+        'NoSuchKey'
+      ) ||
+      message.includes(
+        'The specified key does not exist'
+      ) ||
+      message.toLowerCase().includes(
+        'source video could not be downloaded'
+      )
     ) {
       return res.status(404).json({
-        error: 'Source video was not found in B2.',
-        code: 'SOURCE_VIDEO_NOT_FOUND'
+        error:
+          'Source video was not found in B2.',
+        code:
+          'SOURCE_VIDEO_NOT_FOUND'
       });
     }
 
     if (
-      message.includes('Audio download failed') ||
-      message.includes('Audio response contained no body') ||
-      message.includes('Invalid audio URL')
+      message.includes(
+        'Audio download failed'
+      ) ||
+      message.includes(
+        'Audio response contained no body'
+      ) ||
+      message.includes(
+        'Invalid audio URL'
+      ) ||
+      message.includes(
+        'Audio download timed out'
+      )
     ) {
       return res.status(422).json({
-        error: message,
-        code: 'AUDIO_DOWNLOAD_FAILED'
+        error:
+          message,
+        code:
+          'AUDIO_DOWNLOAD_FAILED'
       });
     }
 
     if (
-      message.toLowerCase().includes('ffmpeg') ||
-      message.includes('Invalid data found when processing input') ||
-      message.includes('Output file')
+      message
+        .toLowerCase()
+        .includes('ffmpeg') ||
+      message.includes(
+        'Invalid data found when processing input'
+      ) ||
+      message.includes(
+        'Output file'
+      )
     ) {
       return res.status(422).json({
-        error: `Video processing failed: ${message}`,
-        code: 'FFMPEG_PROCESSING_FAILED'
+        error:
+          `Video processing failed: ${message}`,
+        code:
+          'FFMPEG_PROCESSING_FAILED'
       });
     }
 
     return res.status(500).json({
-      error: 'Unable to process video.',
-      code: 'VIDEO_PROCESSING_FAILED',
-      details: message
+      error:
+        'Unable to process video.',
+      code:
+        'VIDEO_PROCESSING_FAILED',
+      details:
+        message
     });
   } finally {
     cleanupTempFiles(
@@ -1183,10 +1447,9 @@ const mergeVideoHandler = async (req, res) => {
   }
 };
 
-/*
- * Both routes are kept so the existing frontend or any older
- * frontend implementation can continue working.
- */
+/* =========================================================
+   VIDEO MERGE ROUTES
+========================================================= */
 
 app.post(
   '/api/storage/merge-video',
@@ -1219,16 +1482,23 @@ const resolveSocket = (value) => {
     return null;
   }
 
-  const stringValue = String(value);
+  const stringValue =
+    String(value);
 
   const directSocket =
-    io.sockets.sockets.get(stringValue);
+    io.sockets.sockets.get(
+      stringValue
+    );
 
   if (directSocket) {
     return directSocket.id;
   }
 
-  return activeUsers.get(stringValue) || null;
+  return (
+    activeUsers.get(
+      stringValue
+    ) || null
+  );
 };
 
 const rememberCallRoom = (
@@ -1255,13 +1525,19 @@ const forgetSocketFromCallRooms = (
   socketId
 ) => {
   for (
-    const [roomId, members]
-    of callRooms
+    const [
+      roomId,
+      members
+    ] of callRooms
   ) {
-    members.delete(socketId);
+    members.delete(
+      socketId
+    );
 
     if (!members.size) {
-      callRooms.delete(roomId);
+      callRooms.delete(
+        roomId
+      );
     }
   }
 };
@@ -1289,7 +1565,9 @@ io.on('connection', (socket) => {
       role === 'host'
     ) {
       const hostIdentifier =
-        String(streamId || room);
+        String(
+          streamId || room
+        );
 
       activeUsers.set(
         hostIdentifier,
@@ -1342,15 +1620,20 @@ io.on('connection', (socket) => {
           sockets
             .filter(
               (s) =>
-                s.handshake.query.role ===
+                s.handshake.query
+                  .role ===
                   'viewer' ||
-                s.handshake.query.role ===
+                s.handshake.query
+                  .role ===
                   'signal-viewer'
             )
             .map((s) => ({
-              socketId: s.id,
+              socketId:
+                s.id,
               username:
-                s.handshake.query.username ||
+                s.handshake
+                  .query
+                  .username ||
                 'Anonymous'
             }));
 
@@ -1378,11 +1661,15 @@ io.on('connection', (socket) => {
       {
         id: socket.id,
         username:
-          socket.handshake.query.username
+          socket.handshake
+            .query
+            .username
       }
     );
 
-    broadcastRoomPresence(room);
+    broadcastRoomPresence(
+      room
+    );
   }
 
   /* =======================================================
@@ -1408,7 +1695,8 @@ io.on('connection', (socket) => {
         'friend_presence_changed',
         {
           userId,
-          status: 'online'
+          status:
+            'online'
         }
       );
 
@@ -1432,7 +1720,8 @@ io.on('connection', (socket) => {
 
       if (
         targetSocketId &&
-        targetSocketId !== socket.id
+        targetSocketId !==
+          socket.id
       ) {
         console.log(
           `📞 Routing ${callPayload.callType || 'call'} to ${targetSocketId}`
@@ -1452,7 +1741,9 @@ io.on('connection', (socket) => {
     'decline_call',
     ({ callerId } = {}) => {
       const targetSocketId =
-        resolveSocket(callerId);
+        resolveSocket(
+          callerId
+        );
 
       if (targetSocketId) {
         io.to(
@@ -1504,20 +1795,10 @@ io.on('connection', (socket) => {
         'peer_ready',
         {
           userId,
-          socketId: socket.id
+          socketId:
+            socket.id
         }
       );
-
-      /*
-       * IMPORTANT:
-       * Do not emit incoming_call_signal here.
-       *
-       * The initial incoming call notification
-       * is sent only by initiate_call_signal.
-       *
-       * This prevents duplicate notifications when
-       * a call component reconnects or remounts.
-       */
 
       void targetPeerId;
     }
@@ -1537,7 +1818,8 @@ io.on('connection', (socket) => {
         'peer_ready',
         {
           userId,
-          socketId: socket.id
+          socketId:
+            socket.id
         }
       );
     }
@@ -1555,7 +1837,8 @@ io.on('connection', (socket) => {
 
     if (
       targetSocketId &&
-      targetSocketId !== socket.id
+      targetSocketId !==
+        socket.id
     ) {
       io.to(
         targetSocketId
@@ -1575,10 +1858,14 @@ io.on('connection', (socket) => {
         }
       );
 
-      socket.leave(roomId);
+      socket.leave(
+        roomId
+      );
 
       const members =
-        callRooms.get(roomId);
+        callRooms.get(
+          roomId
+        );
 
       if (members) {
         members.delete(
@@ -1647,7 +1934,9 @@ io.on('connection', (socket) => {
       }
 
       const roomState =
-        streamRooms.get(sid);
+        streamRooms.get(
+          sid
+        );
 
       if (targetHostSocketId) {
         roomState.hostSocketId =
@@ -1784,7 +2073,9 @@ io.on('connection', (socket) => {
       guestId
     } = {}) => {
       const roomState =
-        streamRooms.get(sid);
+        streamRooms.get(
+          sid
+        );
 
       if (
         !roomState ||
@@ -1843,7 +2134,9 @@ io.on('connection', (socket) => {
       );
 
       const targetGuestSocketId =
-        resolveSocket(guestId);
+        resolveSocket(
+          guestId
+        );
 
       if (targetGuestSocketId) {
         io.to(
@@ -1877,7 +2170,9 @@ io.on('connection', (socket) => {
       );
 
       const targetGuestSocketId =
-        resolveSocket(guestId);
+        resolveSocket(
+          guestId
+        );
 
       if (targetGuestSocketId) {
         io.to(
@@ -1904,7 +2199,8 @@ io.on('connection', (socket) => {
         ).emit(
           'cohost_invite_received',
           {
-            room: data.room,
+            room:
+              data.room,
             fromHostId:
               data.fromHostId,
             inviteFrom:
@@ -1929,8 +2225,10 @@ io.on('connection', (socket) => {
         ).emit(
           'cohost_invite_accepted',
           {
-            room: data.room,
-            status: data.status
+            room:
+              data.room,
+            status:
+              data.status
           }
         );
       }
@@ -1996,7 +2294,9 @@ io.on('connection', (socket) => {
       targetViewerId || to;
 
     const targetSocketId =
-      resolveSocket(targetId);
+      resolveSocket(
+        targetId
+      );
 
     const payload = {
       offer,
@@ -2018,7 +2318,8 @@ io.on('connection', (socket) => {
 
     if (
       targetSocketId &&
-      targetSocketId !== socket.id
+      targetSocketId !==
+        socket.id
     ) {
       io.to(
         targetSocketId
@@ -2069,7 +2370,8 @@ io.on('connection', (socket) => {
 
     if (
       destination &&
-      destination !== socket.id
+      destination !==
+        socket.id
     ) {
       io.to(
         destination
@@ -2116,7 +2418,8 @@ io.on('connection', (socket) => {
 
     if (
       destination &&
-      destination !== socket.id
+      destination !==
+        socket.id
     ) {
       io.to(
         destination
@@ -2194,7 +2497,8 @@ io.on('connection', (socket) => {
         'friend_presence_changed',
         {
           userId,
-          status: 'online'
+          status:
+            'online'
         }
       );
     }
@@ -2274,7 +2578,9 @@ io.on('connection', (socket) => {
           role === 'signal-viewer'
         )
       ) {
-        broadcastRoomPresence(room);
+        broadcastRoomPresence(
+          room
+        );
       }
 
       if (
@@ -2307,7 +2613,9 @@ io.on('connection', (socket) => {
         }
       }
 
-      if (socket.hostIdentifier) {
+      if (
+        socket.hostIdentifier
+      ) {
         const hostKey =
           String(
             socket.hostIdentifier
@@ -2345,7 +2653,9 @@ io.on('connection', (socket) => {
 
       if (socket.userId) {
         const userKey =
-          String(socket.userId);
+          String(
+            socket.userId
+          );
 
         if (
           activeUsers.get(
@@ -2361,7 +2671,8 @@ io.on('connection', (socket) => {
             {
               userId:
                 socket.userId,
-              status: 'offline'
+              status:
+                'offline'
             }
           );
         }
