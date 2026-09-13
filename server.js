@@ -10,7 +10,8 @@ const {
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
-  DeleteObjectCommand
+  DeleteObjectCommand,
+  HeadObjectCommand
 } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const ffmpeg = require('fluent-ffmpeg');
@@ -132,9 +133,7 @@ const authenticateSupabaseUser = async (req, res, next) => {
     }
 
     if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
-      console.error(
-        '❌ SUPABASE_URL or SUPABASE_ANON_KEY is missing.'
-      );
+      console.error('❌ SUPABASE_URL or SUPABASE_ANON_KEY is missing.');
 
       return res.status(503).json({
         error: 'Storage authentication is not configured on the server.',
@@ -441,6 +440,142 @@ const downloadRemoteAudioToFile = async (
 };
 
 /* =========================================================
+   FRONTEND FILTER NORMALIZATION
+========================================================= */
+
+const normalizeVideoFilter = (filter) => {
+  const value =
+    typeof filter === 'string'
+      ? filter.trim().toLowerCase()
+      : 'original';
+
+  const filterMap = {
+    original: 'none',
+    none: 'none',
+
+    neon_cyber: 'neon_cyber',
+    electric: 'electric',
+    cinema: 'cinema',
+    golden_hour: 'golden_hour',
+    vintage: 'vintage',
+    midnight: 'midnight',
+    vibrant_pop: 'vibrant_pop',
+
+    normal: 'none',
+    grayscale: 'grayscale',
+    sepia: 'sepia',
+    vivid: 'vivid',
+    bright: 'bright',
+    dark: 'dark',
+    warm: 'warm',
+    cool: 'cool'
+  };
+
+  return filterMap[value] || 'none';
+};
+
+/* =========================================================
+   DETERMINE WHETHER FFMPEG IS ACTUALLY REQUIRED
+========================================================= */
+
+const needsVideoProcessing = ({
+  audioUrl,
+  videoVolume,
+  musicVolume,
+  audioEnhancement,
+  filter
+}) => {
+  const hasMusic =
+    Boolean(audioUrl) &&
+    !['', 'null', 'undefined'].includes(
+      String(audioUrl).trim().toLowerCase()
+    );
+
+  const normalizedFilter =
+    normalizeVideoFilter(filter);
+
+  const normalizedEnhancement =
+    typeof audioEnhancement === 'string'
+      ? audioEnhancement.trim().toLowerCase()
+      : 'none';
+
+  const safeVideoVolume = Number.isFinite(
+    Number(videoVolume)
+  )
+    ? Number(videoVolume)
+    : 1;
+
+  const safeMusicVolume = Number.isFinite(
+    Number(musicVolume)
+  )
+    ? Number(musicVolume)
+    : 1;
+
+  const filterNeedsProcessing =
+    normalizedFilter !== 'none';
+
+  const enhancementNeedsProcessing =
+    normalizedEnhancement !== 'none';
+
+  const videoVolumeNeedsProcessing =
+    Math.abs(safeVideoVolume - 1) > 0.001;
+
+  const musicVolumeNeedsProcessing =
+    hasMusic &&
+    Math.abs(safeMusicVolume - 1) > 0.001;
+
+  return (
+    hasMusic ||
+    filterNeedsProcessing ||
+    enhancementNeedsProcessing ||
+    videoVolumeNeedsProcessing ||
+    musicVolumeNeedsProcessing
+  );
+};
+
+/* =========================================================
+   VERIFY PRIVATE B2 OBJECT
+========================================================= */
+
+const verifyB2Object = async (objectKey) => {
+  const parsed = parseStorageObjectKey(objectKey);
+
+  if (!parsed) {
+    throw new Error('Invalid B2 object key.');
+  }
+
+  const response = await b2.send(
+    new HeadObjectCommand({
+      Bucket: process.env.B2_BUCKET,
+      Key: parsed.normalizedKey
+    })
+  );
+
+  const size = Number(
+    response.ContentLength || 0
+  );
+
+  if (!Number.isFinite(size) || size <= 0) {
+    throw new Error(
+      'Uploaded B2 object is empty or invalid.'
+    );
+  }
+
+  if (size > MAX_UPLOAD_SIZE) {
+    throw new Error(
+      'Uploaded object exceeds the maximum allowed size.'
+    );
+  }
+
+  return {
+    objectKey: parsed.normalizedKey,
+    size,
+    contentType:
+      response.ContentType || 'application/octet-stream'
+  };
+};
+
+/* =========================================================
    PROCESS VIDEO WITH FFMPEG
 ========================================================= */
 
@@ -467,9 +602,7 @@ const processVideoWithFFmpeg = ({
     );
 
     const normalizedFilter =
-      typeof filter === 'string'
-        ? filter.trim().toLowerCase()
-        : 'none';
+      normalizeVideoFilter(filter);
 
     const normalizedEnhancement =
       typeof audioEnhancement === 'string'
@@ -485,7 +618,14 @@ const processVideoWithFFmpeg = ({
       'bright',
       'dark',
       'warm',
-      'cool'
+      'cool',
+      'neon_cyber',
+      'electric',
+      'cinema',
+      'golden_hour',
+      'vintage',
+      'midnight',
+      'vibrant_pop'
     ]);
 
     const allowedEnhancements = new Set([
@@ -495,30 +635,60 @@ const processVideoWithFFmpeg = ({
       'bass_boost'
     ]);
 
-    const safeFilter = allowedFilters.has(normalizedFilter)
+    const safeFilter = allowedFilters.has(
+      normalizedFilter
+    )
       ? normalizedFilter
       : 'none';
 
-    const safeEnhancement = allowedEnhancements.has(
-      normalizedEnhancement
-    )
-      ? normalizedEnhancement
-      : 'none';
+    const safeEnhancement =
+      allowedEnhancements.has(
+        normalizedEnhancement
+      )
+        ? normalizedEnhancement
+        : 'none';
 
     const videoFilterMap = {
       grayscale: 'hue=s=0',
+
       sepia:
         'colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131',
+
       vivid:
         'eq=contrast=1.12:saturation=1.25:brightness=0.02',
+
       bright:
         'eq=brightness=0.08:contrast=1.05',
+
       dark:
         'eq=brightness=-0.08:contrast=1.05',
+
       warm:
         'colorbalance=rs=.08:gs=.03:bs=-.03',
+
       cool:
-        'colorbalance=rs=-.03:gs=.03:bs=.08'
+        'colorbalance=rs=-.03:gs=.03:bs=.08',
+
+      neon_cyber:
+        'eq=contrast=1.08:saturation=1.35:brightness=0.02,hue=h=12',
+
+      electric:
+        'eq=contrast=1.18:saturation=1.50:brightness=0.02,hue=h=24',
+
+      cinema:
+        'eq=contrast=1.12:saturation=0.82:brightness=-0.01',
+
+      golden_hour:
+        'eq=contrast=1.06:saturation=1.25:brightness=0.025,colorbalance=rs=.08:gs=.03:bs=-.04',
+
+      vintage:
+        'eq=contrast=0.96:saturation=0.72:brightness=0.01',
+
+      midnight:
+        'eq=brightness=-0.08:contrast=1.18:saturation=0.90',
+
+      vibrant_pop:
+        'eq=contrast=1.08:saturation=1.65:brightness=0.02'
     };
 
     let command = ffmpeg(sourcePath);
@@ -577,15 +747,24 @@ const processVideoWithFFmpeg = ({
         `[1:a:0]volume=${safeMusicVolume}[music_audio]`
       );
 
-      if (safeEnhancement === 'crystal_voice') {
+      if (
+        safeEnhancement ===
+        'crystal_voice'
+      ) {
         filterGraph.push(
           '[original_audio]highpass=f=80,lowpass=f=12000,acompressor=threshold=-18dB:ratio=3:attack=20:release=250[enhanced_audio]'
         );
-      } else if (safeEnhancement === 'studio_master') {
+      } else if (
+        safeEnhancement ===
+        'studio_master'
+      ) {
         filterGraph.push(
           '[original_audio]highpass=f=50,lowpass=f=16000,acompressor=threshold=-16dB:ratio=2.5:attack=15:release=200,equalizer=f=3000:t=q:w=1:g=2[enhanced_audio]'
         );
-      } else if (safeEnhancement === 'bass_boost') {
+      } else if (
+        safeEnhancement ===
+        'bass_boost'
+      ) {
         filterGraph.push(
           '[original_audio]bass=g=5:f=100[enhanced_audio]'
         );
@@ -599,7 +778,9 @@ const processVideoWithFFmpeg = ({
         '[enhanced_audio][music_audio]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mixed_audio]'
       );
 
-      command.complexFilter(filterGraph);
+      command.complexFilter(
+        filterGraph
+      );
 
       command.outputOptions([
         '-map',
@@ -633,38 +814,45 @@ const processVideoWithFFmpeg = ({
         console.log(commandLine);
       })
       .on('progress', (progress) => {
-        if (progress.percent !== undefined) {
+        if (
+          progress.percent !== undefined
+        ) {
           console.log(
-            `🎬 FFmpeg progress: ${Number(progress.percent).toFixed(1)}%`
+            `🎬 FFmpeg progress: ${Number(
+              progress.percent
+            ).toFixed(1)}%`
           );
         }
       })
-      .on('error', (error, stdout, stderr) => {
-        console.error(
-          '❌ FFmpeg processing error:',
-          error.message
-        );
-
-        if (stdout) {
+      .on(
+        'error',
+        (error, stdout, stderr) => {
           console.error(
-            'FFmpeg stdout:',
-            stdout.slice(-4000)
+            '❌ FFmpeg processing error:',
+            error.message
+          );
+
+          if (stdout) {
+            console.error(
+              'FFmpeg stdout:',
+              stdout.slice(-4000)
+            );
+          }
+
+          if (stderr) {
+            console.error(
+              'FFmpeg stderr:',
+              stderr.slice(-8000)
+            );
+          }
+
+          reject(
+            new Error(
+              `ffmpeg exited with code 1: ${error.message}`
+            )
           );
         }
-
-        if (stderr) {
-          console.error(
-            'FFmpeg stderr:',
-            stderr.slice(-8000)
-          );
-        }
-
-        reject(
-          new Error(
-            `ffmpeg exited with code 1: ${error.message}`
-          )
-        );
-      })
+      )
       .on('end', () => {
         console.log(
           '✅ FFmpeg processing completed.'
@@ -733,8 +921,8 @@ app.post(
         });
       }
 
-      const normalizedFolder = String(folder)
-        .toLowerCase();
+      const normalizedFolder =
+        String(folder).toLowerCase();
 
       if (
         !ALLOWED_STORAGE_FOLDERS.has(
@@ -743,9 +931,10 @@ app.post(
       ) {
         return res.status(400).json({
           error: 'Invalid storage folder.',
-          allowedFolders: Array.from(
-            ALLOWED_STORAGE_FOLDERS
-          )
+          allowedFolders:
+            Array.from(
+              ALLOWED_STORAGE_FOLDERS
+            )
         });
       }
 
@@ -753,21 +942,27 @@ app.post(
         fileSize !== undefined &&
         fileSize !== null
       ) {
-        const numericSize = Number(fileSize);
+        const numericSize =
+          Number(fileSize);
 
         if (
-          !Number.isFinite(numericSize) ||
+          !Number.isFinite(
+            numericSize
+          ) ||
           numericSize <= 0 ||
-          numericSize > MAX_UPLOAD_SIZE
+          numericSize >
+            MAX_UPLOAD_SIZE
         ) {
           return res.status(400).json({
             error: 'Invalid file size.',
-            maxBytes: MAX_UPLOAD_SIZE
+            maxBytes:
+              MAX_UPLOAD_SIZE
           });
         }
       }
 
-      const userId = req.authUser.id;
+      const userId =
+        req.authUser.id;
 
       const objectKey =
         createStorageObjectKey(
@@ -776,31 +971,39 @@ app.post(
           fileName
         );
 
-      const command = new PutObjectCommand({
-        Bucket: process.env.B2_BUCKET,
-        Key: objectKey,
-        ContentType: contentType
-      });
+      const command =
+        new PutObjectCommand({
+          Bucket:
+            process.env.B2_BUCKET,
+          Key:
+            objectKey,
+          ContentType:
+            contentType
+        });
 
-      const uploadUrl = await getSignedUrl(
-        b2,
-        command,
-        {
-          expiresIn: 900
-        }
-      );
+      const uploadUrl =
+        await getSignedUrl(
+          b2,
+          command,
+          {
+            expiresIn: 900
+          }
+        );
 
       return res.json({
         success: true,
         uploadUrl,
         objectKey,
         expiresIn: 900,
-        bucket: process.env.B2_BUCKET,
+        bucket:
+          process.env.B2_BUCKET,
         contentType,
         uploadHeaders: {
-          'Content-Type': contentType
+          'Content-Type':
+            contentType
         },
-        folder: normalizedFolder
+        folder:
+          normalizedFolder
       });
     } catch (error) {
       console.error(
@@ -809,8 +1012,10 @@ app.post(
       );
 
       return res.status(500).json({
-        error: 'Unable to create B2 upload URL.',
-        details: error.message
+        error:
+          'Unable to create B2 upload URL.',
+        details:
+          error.message
       });
     }
   }
@@ -826,23 +1031,30 @@ app.post(
   requireB2,
   async (req, res) => {
     try {
-      const { objectKey } = req.body || {};
+      const {
+        objectKey
+      } = req.body || {};
 
       if (
         !objectKey ||
-        typeof objectKey !== 'string'
+        typeof objectKey !==
+          'string'
       ) {
         return res.status(400).json({
-          error: 'Missing objectKey.'
+          error:
+            'Missing objectKey.'
         });
       }
 
       const parsed =
-        parseStorageObjectKey(objectKey);
+        parseStorageObjectKey(
+          objectKey
+        );
 
       if (!parsed) {
         return res.status(400).json({
-          error: 'Invalid object key.'
+          error:
+            'Invalid object key.'
         });
       }
 
@@ -890,7 +1102,7 @@ app.post(
 
       return res.status(500).json({
         error:
-          'Unable to create B2 download URL.',
+          'Unable to create download URL.',
         details:
           error.message
       });
@@ -908,15 +1120,18 @@ app.delete(
   requireB2,
   async (req, res) => {
     try {
-      const { objectKey } =
-        req.body || {};
+      const {
+        objectKey
+      } = req.body || {};
 
       if (
         !objectKey ||
-        typeof objectKey !== 'string'
+        typeof objectKey !==
+          'string'
       ) {
         return res.status(400).json({
-          error: 'Missing objectKey.'
+          error:
+            'Missing objectKey.'
         });
       }
 
@@ -927,7 +1142,8 @@ app.delete(
 
       if (!parsed) {
         return res.status(400).json({
-          error: 'Invalid object key.'
+          error:
+            'Invalid object key.'
         });
       }
 
@@ -976,16 +1192,6 @@ app.delete(
 
 /* =========================================================
    VIDEO / AUDIO MERGE
-
-   PRIVATE B2 SOURCE
-        ↓
-   RENDER TEMP FILE
-        ↓
-      FFMPEG
-        ↓
-   FINAL MP4 TEMP FILE
-        ↓
-      PRIVATE B2
 ========================================================= */
 
 const mergeVideoHandler = async (
@@ -1015,7 +1221,8 @@ const mergeVideoHandler = async (
       });
     }
 
-    const body = req.body || {};
+    const body =
+      req.body || {};
 
     const sourceObjectKey =
       body.sourceObjectKey ||
@@ -1047,16 +1254,17 @@ const mergeVideoHandler = async (
         : 'none';
 
     const filter =
-      typeof body.filter === 'string'
+      typeof body.filter ===
+      'string'
         ? body.filter
             .trim()
             .toLowerCase()
-        : 'none';
+        : 'original';
 
     if (!sourceObjectKey) {
       return res.status(400).json({
         error:
-          'Missing source videoUrl field.'
+          'Missing source video object key.'
       });
     }
 
@@ -1066,7 +1274,7 @@ const mergeVideoHandler = async (
     ) {
       return res.status(400).json({
         error:
-          'Invalid source videoUrl field.'
+          'Invalid source video object key.'
       });
     }
 
@@ -1150,26 +1358,13 @@ const mergeVideoHandler = async (
         )
       );
 
-    const uniqueId =
-      crypto.randomUUID();
-
-    const sourceExtension =
-      getExtension(
-        parsedSource.normalizedKey
-      ) || '.webm';
-
-    sourcePath = path.join(
-      os.tmpdir(),
-      `made-source-${Date.now()}-${uniqueId}${sourceExtension}`
-    );
-
-    outputPath = path.join(
-      os.tmpdir(),
-      `made-final-${Date.now()}-${uniqueId}.mp4`
-    );
+    const normalizedFilter =
+      normalizeVideoFilter(
+        filter
+      );
 
     console.log(
-      '🎥 Video merge request received.'
+      '🎥 Video upload/processing request received.'
     );
 
     console.log(
@@ -1197,11 +1392,96 @@ const mergeVideoHandler = async (
     );
 
     console.log(
-      `🎨 Filter: ${filter}`
+      `🎨 Filter: ${normalizedFilter}`
     );
 
+    /* =======================================================
+       FAST PATH
+
+       If the uploaded B2 source does not require any
+       transformation, DO NOT:
+
+       - download video to Render
+       - download music
+       - run FFmpeg
+       - upload another MP4
+
+       The already-uploaded private B2 object becomes
+       the published video.
+    ======================================================= */
+
+    const processingRequired =
+      needsVideoProcessing({
+        audioUrl,
+        videoVolume:
+          safeVideoVolume,
+        musicVolume:
+          safeMusicVolume,
+        audioEnhancement:
+          safeEnhancement,
+        filter:
+          normalizedFilter
+      });
+
+    console.log(
+      `⚡ Processing required: ${processingRequired}`
+    );
+
+    if (!processingRequired) {
+      console.log(
+        '⚡ FAST PATH: verifying uploaded B2 object...'
+      );
+
+      const verifiedObject =
+        await verifyB2Object(
+          parsedSource.normalizedKey
+        );
+
+      console.log(
+        `🚀 FAST PATH COMPLETE: ${verifiedObject.size} bytes published without FFmpeg.`
+      );
+
+      return res.status(200).json({
+        success: true,
+        processed: false,
+        fastPath: true,
+        objectKey:
+          verifiedObject.objectKey,
+        folder:
+          'videos',
+        contentType:
+          verifiedObject.contentType,
+        size:
+          verifiedObject.size
+      });
+    }
+
+    /* =======================================================
+       PROCESSING PATH
+    ======================================================= */
+
+    const uniqueId =
+      crypto.randomUUID();
+
+    const sourceExtension =
+      getExtension(
+        parsedSource.normalizedKey
+      ) || '.webm';
+
+    sourcePath =
+      path.join(
+        os.tmpdir(),
+        `made-source-${Date.now()}-${uniqueId}${sourceExtension}`
+      );
+
+    outputPath =
+      path.join(
+        os.tmpdir(),
+        `made-final-${Date.now()}-${uniqueId}.mp4`
+      );
+
     /* -------------------------------------------------------
-       DOWNLOAD SOURCE VIDEO FROM PRIVATE B2
+       DOWNLOAD SOURCE VIDEO
     ------------------------------------------------------- */
 
     console.log(
@@ -1213,7 +1493,11 @@ const mergeVideoHandler = async (
       sourcePath
     );
 
-    if (!fs.existsSync(sourcePath)) {
+    if (
+      !fs.existsSync(
+        sourcePath
+      )
+    ) {
       throw new Error(
         'Source video could not be downloaded from B2.'
       );
@@ -1224,7 +1508,9 @@ const mergeVideoHandler = async (
         sourcePath
       );
 
-    if (sourceStats.size <= 0) {
+    if (
+      sourceStats.size <= 0
+    ) {
       throw new Error(
         'Downloaded source video is empty.'
       );
@@ -1253,10 +1539,11 @@ const mergeVideoHandler = async (
       const audioId =
         crypto.randomUUID();
 
-      audioPath = path.join(
-        os.tmpdir(),
-        `made-audio-${Date.now()}-${audioId}.audio`
-      );
+      audioPath =
+        path.join(
+          os.tmpdir(),
+          `made-audio-${Date.now()}-${audioId}.audio`
+        );
 
       console.log(
         '⬇️ Downloading external audio...'
@@ -1267,7 +1554,11 @@ const mergeVideoHandler = async (
         audioPath
       );
 
-      if (!fs.existsSync(audioPath)) {
+      if (
+        !fs.existsSync(
+          audioPath
+        )
+      ) {
         throw new Error(
           'Audio file could not be downloaded.'
         );
@@ -1278,7 +1569,9 @@ const mergeVideoHandler = async (
           audioPath
         );
 
-      if (audioStats.size <= 0) {
+      if (
+        audioStats.size <= 0
+      ) {
         throw new Error(
           'Downloaded audio file is empty.'
         );
@@ -1307,10 +1600,15 @@ const mergeVideoHandler = async (
         safeMusicVolume,
       audioEnhancement:
         safeEnhancement,
-      filter
+      filter:
+        normalizedFilter
     });
 
-    if (!fs.existsSync(outputPath)) {
+    if (
+      !fs.existsSync(
+        outputPath
+      )
+    ) {
       throw new Error(
         'FFmpeg completed but generated video file was not found.'
       );
@@ -1321,7 +1619,9 @@ const mergeVideoHandler = async (
         outputPath
       );
 
-    if (outputStats.size <= 0) {
+    if (
+      outputStats.size <= 0
+    ) {
       throw new Error(
         'Generated video file is empty.'
       );
@@ -1332,7 +1632,7 @@ const mergeVideoHandler = async (
     );
 
     /* -------------------------------------------------------
-       UPLOAD FINAL MP4 BACK TO B2
+       UPLOAD FINAL MP4 TO B2
     ------------------------------------------------------- */
 
     const finalFileName =
@@ -1375,6 +1675,8 @@ const mergeVideoHandler = async (
 
     return res.status(200).json({
       success: true,
+      processed: true,
+      fastPath: false,
       objectKey:
         finalObjectKey,
       folder:
@@ -1411,6 +1713,22 @@ const mergeVideoHandler = async (
           'Source video was not found in B2.',
         code:
           'SOURCE_VIDEO_NOT_FOUND'
+      });
+    }
+
+    if (
+      message.includes(
+        'Uploaded B2 object is empty'
+      ) ||
+      message.includes(
+        'Uploaded object exceeds'
+      )
+    ) {
+      return res.status(422).json({
+        error:
+          message,
+        code:
+          'INVALID_UPLOADED_OBJECT'
       });
     }
 
@@ -1494,15 +1812,22 @@ app.post(
    GLOBAL USER / STREAM STATE
 ========================================================= */
 
-const activeUsers = new Map();
-const streamRooms = new Map();
-const callRooms = new Map();
+const activeUsers =
+  new Map();
+
+const streamRooms =
+  new Map();
+
+const callRooms =
+  new Map();
 
 /* =========================================================
    SOCKET HELPERS
 ========================================================= */
 
-const resolveSocket = (value) => {
+const resolveSocket = (
+  value
+) => {
   if (!value) {
     return null;
   }
@@ -1534,7 +1859,11 @@ const rememberCallRoom = (
     return;
   }
 
-  if (!callRooms.has(roomId)) {
+  if (
+    !callRooms.has(
+      roomId
+    )
+  ) {
     callRooms.set(
       roomId,
       new Set()
@@ -1571,238 +1900,155 @@ const forgetSocketFromCallRooms = (
    SOCKET.IO
 ========================================================= */
 
-io.on('connection', (socket) => {
-  const {
-    room,
-    role,
-    streamId
-  } = socket.handshake.query;
+io.on(
+  'connection',
+  (socket) => {
+    const {
+      room,
+      role,
+      streamId
+    } =
+      socket.handshake.query;
 
-  if (room) {
-    socket.join(room);
-
-    console.log(
-      `🔌 Connection: Socket ${socket.id} joined room [${room}] as (${role})`
-    );
-
-    if (
-      role === 'cohost_master' ||
-      role === 'host'
-    ) {
-      const hostIdentifier =
-        String(
-          streamId || room
-        );
-
-      activeUsers.set(
-        hostIdentifier,
-        socket.id
-      );
-
-      socket.hostIdentifier =
-        hostIdentifier;
-
-      if (
-        !streamRooms.has(
-          hostIdentifier
-        )
-      ) {
-        streamRooms.set(
-          hostIdentifier,
-          {
-            hostSocketId:
-              socket.id,
-            guestPanels:
-              new Map()
-          }
-        );
-      } else {
-        streamRooms.get(
-          hostIdentifier
-        ).hostSocketId =
-          socket.id;
-      }
+    if (room) {
+      socket.join(room);
 
       console.log(
-        `📡 Host registered: ${hostIdentifier} -> ${socket.id}`
+        `🔌 Connection: Socket ${socket.id} joined room [${room}] as (${role})`
+      );
+
+      if (
+        role === 'cohost_master' ||
+        role === 'host'
+      ) {
+        const hostIdentifier =
+          String(
+            streamId || room
+          );
+
+        activeUsers.set(
+          hostIdentifier,
+          socket.id
+        );
+
+        socket.hostIdentifier =
+          hostIdentifier;
+
+        if (
+          !streamRooms.has(
+            hostIdentifier
+          )
+        ) {
+          streamRooms.set(
+            hostIdentifier,
+            {
+              hostSocketId:
+                socket.id,
+              guestPanels:
+                new Map()
+            }
+          );
+        } else {
+          streamRooms.get(
+            hostIdentifier
+          ).hostSocketId =
+            socket.id;
+        }
+
+        console.log(
+          `📡 Host registered: ${hostIdentifier} -> ${socket.id}`
+        );
+      }
+    } else {
+      console.log(
+        `🔌 New client without room: ${socket.id}`
       );
     }
-  } else {
-    console.log(
-      `🔌 New client without room: ${socket.id}`
-    );
-  }
 
-  const broadcastRoomPresence =
-    async (roomName) => {
-      try {
-        const sockets =
-          await io
-            .in(roomName)
-            .fetchSockets();
+    const broadcastRoomPresence =
+      async (
+        roomName
+      ) => {
+        try {
+          const sockets =
+            await io
+              .in(roomName)
+              .fetchSockets();
 
-        const viewersList =
-          sockets
-            .filter(
-              (s) =>
-                s.handshake.query
-                  .role ===
-                  'viewer' ||
-                s.handshake.query
-                  .role ===
-                  'signal-viewer'
-            )
-            .map((s) => ({
-              socketId:
-                s.id,
-              username:
-                s.handshake
-                  .query
-                  .username ||
-                'Anonymous'
-            }));
+          const viewersList =
+            sockets
+              .filter(
+                (s) =>
+                  s.handshake
+                    .query
+                    .role ===
+                    'viewer' ||
+                  s.handshake
+                    .query
+                    .role ===
+                    'signal-viewer'
+              )
+              .map(
+                (s) => ({
+                  socketId:
+                    s.id,
+                  username:
+                    s.handshake
+                      .query
+                      .username ||
+                    'Anonymous'
+                })
+              );
 
-        io.to(roomName).emit(
-          'room_presence_update',
-          viewersList
-        );
-      } catch (err) {
-        console.error(
-          '❌ Presence tracking error:',
-          err
-        );
-      }
-    };
+          io.to(
+            roomName
+          ).emit(
+            'room_presence_update',
+            viewersList
+          );
+        } catch (err) {
+          console.error(
+            '❌ Presence tracking error:',
+            err
+          );
+        }
+      };
 
-  if (
-    room &&
-    (
-      role === 'viewer' ||
-      role === 'signal-viewer'
-    )
-  ) {
-    socket.to(room).emit(
-      'viewer_joined',
-      {
-        id: socket.id,
-        username:
-          socket.handshake
-            .query
-            .username
-      }
-    );
-
-    broadcastRoomPresence(
-      room
-    );
-  }
-
-  /* =======================================================
-     USER SESSION
-  ======================================================= */
-
-  socket.on(
-    'register_user_session',
-    ({ userId } = {}) => {
-      if (!userId) {
-        return;
-      }
-
-      socket.userId =
-        String(userId);
-
-      activeUsers.set(
-        String(userId),
-        socket.id
-      );
-
-      io.emit(
-        'friend_presence_changed',
+    if (
+      room &&
+      (
+        role === 'viewer' ||
+        role === 'signal-viewer'
+      )
+    ) {
+      socket.to(room).emit(
+        'viewer_joined',
         {
-          userId,
-          status:
-            'online'
+          id:
+            socket.id,
+          username:
+            socket.handshake
+              .query
+              .username
         }
       );
 
-      console.log(
-        `🟢 User ${userId} registered on socket ${socket.id}`
+      broadcastRoomPresence(
+        room
       );
     }
-  );
 
-  /* =======================================================
-     DIRECT CALL SIGNAL
-  ======================================================= */
+    /* =======================================================
+       USER SESSION
+    ======================================================= */
 
-  socket.on(
-    'initiate_call_signal',
-    (callPayload = {}) => {
-      const targetSocketId =
-        resolveSocket(
-          callPayload.receiverId
-        );
+    socket.on(
+      'register_user_session',
+      ({ userId } = {}) => {
+        if (!userId) {
+          return;
+        }
 
-      if (
-        targetSocketId &&
-        targetSocketId !==
-          socket.id
-      ) {
-        console.log(
-          `📞 Routing ${callPayload.callType || 'call'} to ${targetSocketId}`
-        );
-
-        io.to(
-          targetSocketId
-        ).emit(
-          'incoming_call_signal',
-          callPayload
-        );
-      }
-    }
-  );
-
-  socket.on(
-    'decline_call',
-    ({ callerId } = {}) => {
-      const targetSocketId =
-        resolveSocket(
-          callerId
-        );
-
-      if (targetSocketId) {
-        io.to(
-          targetSocketId
-        ).emit(
-          'call_cancelled_by_caller'
-        );
-      }
-    }
-  );
-
-  /* =======================================================
-     P2P CALL ROOMS
-  ======================================================= */
-
-  socket.on(
-    'join_call_room',
-    ({
-      roomId,
-      userId,
-      targetPeerId
-    } = {}) => {
-      if (!roomId) {
-        return;
-      }
-
-      socket.join(roomId);
-
-      rememberCallRoom(
-        roomId,
-        socket.id
-      );
-
-      if (userId) {
         socket.userId =
           String(userId);
 
@@ -1810,901 +2056,1042 @@ io.on('connection', (socket) => {
           String(userId),
           socket.id
         );
-      }
 
-      console.log(
-        `📞 Socket ${socket.id} joined P2P call room: ${roomId}`
-      );
-
-      socket.to(roomId).emit(
-        'peer_ready',
-        {
-          userId,
-          socketId:
-            socket.id
-        }
-      );
-
-      void targetPeerId;
-    }
-  );
-
-  socket.on(
-    'peer_ready',
-    ({
-      roomId,
-      userId
-    } = {}) => {
-      if (!roomId) {
-        return;
-      }
-
-      socket.to(roomId).emit(
-        'peer_ready',
-        {
-          userId,
-          socketId:
-            socket.id
-        }
-      );
-    }
-  );
-
-  const endCall = ({
-    roomId,
-    to,
-    userId
-  } = {}) => {
-    const targetSocketId =
-      resolveSocket(
-        to || userId
-      );
-
-    if (
-      targetSocketId &&
-      targetSocketId !==
-        socket.id
-    ) {
-      io.to(
-        targetSocketId
-      ).emit(
-        'peer_hung_up',
-        {
-          roomId
-        }
-      );
-    }
-
-    if (roomId) {
-      socket.to(roomId).emit(
-        'peer_hung_up',
-        {
-          roomId
-        }
-      );
-
-      socket.leave(
-        roomId
-      );
-
-      const members =
-        callRooms.get(
-          roomId
+        io.emit(
+          'friend_presence_changed',
+          {
+            userId,
+            status:
+              'online'
+          }
         );
 
-      if (members) {
-        members.delete(
+        console.log(
+          `🟢 User ${userId} registered on socket ${socket.id}`
+        );
+      }
+    );
+
+    /* =======================================================
+       DIRECT CALL SIGNAL
+    ======================================================= */
+
+    socket.on(
+      'initiate_call_signal',
+      (callPayload = {}) => {
+        const targetSocketId =
+          resolveSocket(
+            callPayload.receiverId
+          );
+
+        if (
+          targetSocketId &&
+          targetSocketId !==
+            socket.id
+        ) {
+          console.log(
+            `📞 Routing ${callPayload.callType || 'call'} to ${targetSocketId}`
+          );
+
+          io.to(
+            targetSocketId
+          ).emit(
+            'incoming_call_signal',
+            callPayload
+          );
+        }
+      }
+    );
+
+    socket.on(
+      'decline_call',
+      ({ callerId } = {}) => {
+        const targetSocketId =
+          resolveSocket(
+            callerId
+          );
+
+        if (targetSocketId) {
+          io.to(
+            targetSocketId
+          ).emit(
+            'call_cancelled_by_caller'
+          );
+        }
+      }
+    );
+
+    /* =======================================================
+       P2P CALL ROOMS
+    ======================================================= */
+
+    socket.on(
+      'join_call_room',
+      ({
+        roomId,
+        userId,
+        targetPeerId
+      } = {}) => {
+        if (!roomId) {
+          return;
+        }
+
+        socket.join(roomId);
+
+        rememberCallRoom(
+          roomId,
           socket.id
         );
 
-        if (!members.size) {
-          callRooms.delete(
-            roomId
+        if (userId) {
+          socket.userId =
+            String(userId);
+
+          activeUsers.set(
+            String(userId),
+            socket.id
           );
         }
+
+        console.log(
+          `📞 Socket ${socket.id} joined P2P call room: ${roomId}`
+        );
+
+        socket.to(roomId).emit(
+          'peer_ready',
+          {
+            userId,
+            socketId:
+              socket.id
+          }
+        );
+
+        void targetPeerId;
       }
-    }
-  };
+    );
 
-  socket.on(
-    'reject_incoming_call',
-    endCall
-  );
+    socket.on(
+      'peer_ready',
+      ({
+        roomId,
+        userId
+      } = {}) => {
+        if (!roomId) {
+          return;
+        }
 
-  socket.on(
-    'end_call',
-    endCall
-  );
+        socket.to(roomId).emit(
+          'peer_ready',
+          {
+            userId,
+            socketId:
+              socket.id
+          }
+        );
+      }
+    );
 
-  socket.on(
-    'hang_up_call',
-    endCall
-  );
-
-  /* =======================================================
-     MULTI-PANEL LIVE STREAM INGEST
-  ======================================================= */
-
-  socket.on(
-    'publish_guest_feed',
-    ({
-      streamId: sid,
-      guestId,
-      targetHostId,
-      sdpOffer,
-      mode
+    const endCall = ({
+      roomId,
+      to,
+      userId
     } = {}) => {
-      if (!sid || !guestId) {
-        return;
-      }
-
-      const targetHostSocketId =
+      const targetSocketId =
         resolveSocket(
-          targetHostId
-        ) ||
-        streamRooms.get(
-          sid
-        )?.hostSocketId;
-
-      if (!streamRooms.has(sid)) {
-        streamRooms.set(
-          sid,
-          {
-            hostSocketId:
-              targetHostSocketId,
-            guestPanels:
-              new Map()
-          }
-        );
-      }
-
-      const roomState =
-        streamRooms.get(
-          sid
-        );
-
-      if (targetHostSocketId) {
-        roomState.hostSocketId =
-          targetHostSocketId;
-      }
-
-      roomState.guestPanels.set(
-        String(guestId),
-        socket.id
-      );
-
-      socket.data.isGuestPanel =
-        true;
-
-      socket.data.guestId =
-        String(guestId);
-
-      socket.data.streamId =
-        sid;
-
-      const payload = {
-        guestId,
-        guestSocketId:
-          socket.id,
-        sdpOffer,
-        mode
-      };
-
-      console.log(
-        `🎥 Guest ${guestId} publishing feed to stream ${sid}`
-      );
-
-      if (targetHostSocketId) {
-        io.to(
-          targetHostSocketId
-        ).emit(
-          'incoming_guest_panel_feed',
-          payload
-        );
-      } else {
-        socket.to(sid).emit(
-          'incoming_guest_panel_feed',
-          payload
-        );
-      }
-    }
-  );
-
-  socket.on(
-    'host_ack_guest_feed',
-    ({
-      guestSocketId,
-      sdpAnswer,
-      guestId
-    } = {}) => {
-      if (!guestSocketId) {
-        return;
-      }
-
-      io.to(
-        guestSocketId
-      ).emit(
-        'broadcast_ack_received',
-        {
-          sdpAnswer,
-          guestId
-        }
-      );
-    }
-  );
-
-  socket.on(
-    'guest_ice_candidate',
-    ({
-      streamId: sid,
-      candidate,
-      to
-    } = {}) => {
-      const targetHostSocketId =
-        resolveSocket(to) ||
-        streamRooms.get(
-          sid
-        )?.hostSocketId;
-
-      if (targetHostSocketId) {
-        io.to(
-          targetHostSocketId
-        ).emit(
-          'incoming_guest_ice',
-          {
-            candidate,
-            fromGuestSocketId:
-              socket.id
-          }
-        );
-      } else if (sid) {
-        socket.to(sid).emit(
-          'incoming_guest_ice',
-          {
-            candidate,
-            fromGuestSocketId:
-              socket.id
-          }
-        );
-      }
-    }
-  );
-
-  socket.on(
-    'host_ice_candidate',
-    ({
-      targetGuestSocketId,
-      candidate
-    } = {}) => {
-      if (!targetGuestSocketId) {
-        return;
-      }
-
-      io.to(
-        targetGuestSocketId
-      ).emit(
-        'incoming_host_ice',
-        {
-          candidate
-        }
-      );
-    }
-  );
-
-  socket.on(
-    'remove_guest_panel',
-    ({
-      streamId: sid,
-      guestId
-    } = {}) => {
-      const roomState =
-        streamRooms.get(
-          sid
+          to || userId
         );
 
       if (
-        !roomState ||
-        !roomState.guestPanels.has(
-          String(guestId)
-        )
+        targetSocketId &&
+        targetSocketId !==
+          socket.id
       ) {
-        return;
+        io.to(
+          targetSocketId
+        ).emit(
+          'peer_hung_up',
+          {
+            roomId
+          }
+        );
       }
 
-      const guestSocketId =
-        roomState.guestPanels.get(
-          String(guestId)
+      if (roomId) {
+        socket.to(roomId).emit(
+          'peer_hung_up',
+          {
+            roomId
+          }
         );
 
-      io.to(
-        guestSocketId
-      ).emit(
-        'removed_from_panel'
-      );
+        socket.leave(
+          roomId
+        );
 
-      roomState.guestPanels.delete(
-        String(guestId)
-      );
+        const members =
+          callRooms.get(
+            roomId
+          );
 
-      console.log(
-        `🚫 Guest ${guestId} removed from panel`
-      );
-    }
-  );
+        if (members) {
+          members.delete(
+            socket.id
+          );
 
-  /* =======================================================
-     COHOST MANAGEMENT
-  ======================================================= */
-
-  socket.on(
-    'approve_cohost',
-    ({
-      streamId: sid,
-      guestId,
-      mode
-    } = {}) => {
-      if (!sid || !guestId) {
-        return;
+          if (!members.size) {
+            callRooms.delete(
+              roomId
+            );
+          }
+        }
       }
+    };
 
-      const payload = {
+    socket.on(
+      'reject_incoming_call',
+      endCall
+    );
+
+    socket.on(
+      'end_call',
+      endCall
+    );
+
+    socket.on(
+      'hang_up_call',
+      endCall
+    );
+
+    /* =======================================================
+       MULTI-PANEL LIVE STREAM INGEST
+    ======================================================= */
+
+    socket.on(
+      'publish_guest_feed',
+      ({
         streamId: sid,
         guestId,
+        targetHostId,
+        sdpOffer,
         mode
-      };
+      } = {}) => {
+        if (
+          !sid ||
+          !guestId
+        ) {
+          return;
+        }
 
-      io.to(sid).emit(
-        'cohost_approved',
-        payload
-      );
+        const targetHostSocketId =
+          resolveSocket(
+            targetHostId
+          ) ||
+          streamRooms.get(
+            sid
+          )?.hostSocketId;
 
-      const targetGuestSocketId =
-        resolveSocket(
-          guestId
+        if (
+          !streamRooms.has(
+            sid
+          )
+        ) {
+          streamRooms.set(
+            sid,
+            {
+              hostSocketId:
+                targetHostSocketId,
+              guestPanels:
+                new Map()
+            }
+          );
+        }
+
+        const roomState =
+          streamRooms.get(
+            sid
+          );
+
+        if (
+          targetHostSocketId
+        ) {
+          roomState.hostSocketId =
+            targetHostSocketId;
+        }
+
+        roomState.guestPanels.set(
+          String(guestId),
+          socket.id
         );
 
-      if (targetGuestSocketId) {
+        socket.data.isGuestPanel =
+          true;
+
+        socket.data.guestId =
+          String(guestId);
+
+        socket.data.streamId =
+          sid;
+
+        const payload = {
+          guestId,
+          guestSocketId:
+            socket.id,
+          sdpOffer,
+          mode
+        };
+
+        console.log(
+          `🎥 Guest ${guestId} publishing feed to stream ${sid}`
+        );
+
+        if (
+          targetHostSocketId
+        ) {
+          io.to(
+            targetHostSocketId
+          ).emit(
+            'incoming_guest_panel_feed',
+            payload
+          );
+        } else {
+          socket.to(sid).emit(
+            'incoming_guest_panel_feed',
+            payload
+          );
+        }
+      }
+    );
+
+    socket.on(
+      'host_ack_guest_feed',
+      ({
+        guestSocketId,
+        sdpAnswer,
+        guestId
+      } = {}) => {
+        if (
+          !guestSocketId
+        ) {
+          return;
+        }
+
+        io.to(
+          guestSocketId
+        ).emit(
+          'broadcast_ack_received',
+          {
+            sdpAnswer,
+            guestId
+          }
+        );
+      }
+    );
+
+    socket.on(
+      'guest_ice_candidate',
+      ({
+        streamId: sid,
+        candidate,
+        to
+      } = {}) => {
+        const targetHostSocketId =
+          resolveSocket(to) ||
+          streamRooms.get(
+            sid
+          )?.hostSocketId;
+
+        if (
+          targetHostSocketId
+        ) {
+          io.to(
+            targetHostSocketId
+          ).emit(
+            'incoming_guest_ice',
+            {
+              candidate,
+              fromGuestSocketId:
+                socket.id
+            }
+          );
+        } else if (sid) {
+          socket.to(sid).emit(
+            'incoming_guest_ice',
+            {
+              candidate,
+              fromGuestSocketId:
+                socket.id
+            }
+          );
+        }
+      }
+    );
+
+    socket.on(
+      'host_ice_candidate',
+      ({
+        targetGuestSocketId,
+        candidate
+      } = {}) => {
+        if (
+          !targetGuestSocketId
+        ) {
+          return;
+        }
+
         io.to(
           targetGuestSocketId
         ).emit(
+          'incoming_host_ice',
+          {
+            candidate
+          }
+        );
+      }
+    );
+
+    socket.on(
+      'remove_guest_panel',
+      ({
+        streamId: sid,
+        guestId
+      } = {}) => {
+        const roomState =
+          streamRooms.get(
+            sid
+          );
+
+        if (
+          !roomState ||
+          !roomState.guestPanels.has(
+            String(guestId)
+          )
+        ) {
+          return;
+        }
+
+        const guestSocketId =
+          roomState.guestPanels.get(
+            String(guestId)
+          );
+
+        io.to(
+          guestSocketId
+        ).emit(
+          'removed_from_panel'
+        );
+
+        roomState.guestPanels.delete(
+          String(guestId)
+        );
+
+        console.log(
+          `🚫 Guest ${guestId} removed from panel`
+        );
+      }
+    );
+
+    /* =======================================================
+       COHOST MANAGEMENT
+    ======================================================= */
+
+    socket.on(
+      'approve_cohost',
+      ({
+        streamId: sid,
+        guestId,
+        mode
+      } = {}) => {
+        if (
+          !sid ||
+          !guestId
+        ) {
+          return;
+        }
+
+        const payload = {
+          streamId:
+            sid,
+          guestId,
+          mode
+        };
+
+        io.to(sid).emit(
           'cohost_approved',
           payload
         );
-      }
-    }
-  );
 
-  socket.on(
-    'kick_cohost',
-    ({
-      streamId: sid,
-      guestId
-    } = {}) => {
-      if (!sid || !guestId) {
-        return;
-      }
+        const targetGuestSocketId =
+          resolveSocket(
+            guestId
+          );
 
-      const payload = {
+        if (
+          targetGuestSocketId
+        ) {
+          io.to(
+            targetGuestSocketId
+          ).emit(
+            'cohost_approved',
+            payload
+          );
+        }
+      }
+    );
+
+    socket.on(
+      'kick_cohost',
+      ({
         streamId: sid,
         guestId
-      };
+      } = {}) => {
+        if (
+          !sid ||
+          !guestId
+        ) {
+          return;
+        }
 
-      io.to(sid).emit(
-        'cohost_kicked',
-        payload
-      );
-
-      const targetGuestSocketId =
-        resolveSocket(
+        const payload = {
+          streamId:
+            sid,
           guestId
-        );
+        };
 
-      if (targetGuestSocketId) {
-        io.to(
-          targetGuestSocketId
-        ).emit(
+        io.to(sid).emit(
           'cohost_kicked',
           payload
         );
+
+        const targetGuestSocketId =
+          resolveSocket(
+            guestId
+          );
+
+        if (
+          targetGuestSocketId
+        ) {
+          io.to(
+            targetGuestSocketId
+          ).emit(
+            'cohost_kicked',
+            payload
+          );
+        }
       }
-    }
-  );
+    );
 
-  socket.on(
-    'send_cohost_invite',
-    (data = {}) => {
-      const targetSocketId =
-        resolveSocket(
-          data.targetUserId
-        );
+    socket.on(
+      'send_cohost_invite',
+      (data = {}) => {
+        const targetSocketId =
+          resolveSocket(
+            data.targetUserId
+          );
 
-      if (targetSocketId) {
-        io.to(
+        if (
           targetSocketId
-        ).emit(
-          'cohost_invite_received',
-          {
-            room:
-              data.room,
-            fromHostId:
-              data.fromHostId,
-            inviteFrom:
-              data.inviteFrom
-          }
-        );
+        ) {
+          io.to(
+            targetSocketId
+          ).emit(
+            'cohost_invite_received',
+            {
+              room:
+                data.room,
+              fromHostId:
+                data.fromHostId,
+              inviteFrom:
+                data.inviteFrom
+            }
+          );
+        }
       }
-    }
-  );
+    );
 
-  socket.on(
-    'respond_cohost_invite',
-    (data = {}) => {
-      const originHostSocketId =
-        resolveSocket(
-          data.targetUserId
-        );
+    socket.on(
+      'respond_cohost_invite',
+      (data = {}) => {
+        const originHostSocketId =
+          resolveSocket(
+            data.targetUserId
+          );
 
-      if (originHostSocketId) {
-        io.to(
+        if (
           originHostSocketId
-        ).emit(
-          'cohost_invite_accepted',
+        ) {
+          io.to(
+            originHostSocketId
+          ).emit(
+            'cohost_invite_accepted',
+            {
+              room:
+                data.room,
+              status:
+                data.status
+            }
+          );
+        }
+      }
+    );
+
+    /* =======================================================
+       REACTIONS
+    ======================================================= */
+
+    socket.on(
+      'send_reaction',
+      (data = {}) => {
+        if (room) {
+          socket.to(room).emit(
+            'received_reaction',
+            data
+          );
+        }
+      }
+    );
+
+    socket.on(
+      'request_host_stream',
+      ({
+        streamId: sid
+      } = {}) => {
+        if (!sid) {
+          return;
+        }
+
+        socket.to(sid).emit(
+          'viewer_requesting_stream',
           {
-            room:
-              data.room,
-            status:
-              data.status
+            viewerSocketId:
+              socket.id
           }
         );
       }
-    }
-  );
-
-  /* =======================================================
-     REACTIONS
-  ======================================================= */
-
-  socket.on(
-    'send_reaction',
-    (data = {}) => {
-      if (room) {
-        socket.to(room).emit(
-          'received_reaction',
-          data
-        );
-      }
-    }
-  );
-
-  socket.on(
-    'request_host_stream',
-    ({
-      streamId: sid
-    } = {}) => {
-      if (!sid) {
-        return;
-      }
-
-      socket.to(sid).emit(
-        'viewer_requesting_stream',
-        {
-          viewerSocketId:
-            socket.id
-        }
-      );
-    }
-  );
-
-  /* =======================================================
-     WEBRTC SIGNALING
-  ======================================================= */
-
-  const routeWebRTCOffer = (
-    data = {}
-  ) => {
-    const {
-      streamId: sid,
-      roomId,
-      offer,
-      targetViewerId,
-      to,
-      guestId,
-      mode
-    } = data;
-
-    const activeRoom =
-      roomId || sid;
-
-    const targetId =
-      targetViewerId || to;
-
-    const targetSocketId =
-      resolveSocket(
-        targetId
-      );
-
-    const payload = {
-      offer,
-      guestId:
-        guestId ||
-        socket.userId ||
-        socket.id,
-      mode:
-        mode || 'video',
-      hostSocketId:
-        socket.id,
-      senderSocketId:
-        socket.id
-    };
-
-    console.log(
-      `📤 WebRTC offer from ${socket.id} -> ${targetId || activeRoom || 'none'}`
     );
 
-    if (
-      targetSocketId &&
-      targetSocketId !==
-        socket.id
-    ) {
-      io.to(
-        targetSocketId
-      ).emit(
-        'webrtc_offer_received',
-        payload
-      );
-    } else if (activeRoom) {
-      socket.to(
-        activeRoom
-      ).emit(
-        'webrtc_offer_received',
-        payload
-      );
-    }
-  };
+    /* =======================================================
+       WEBRTC SIGNALING
+    ======================================================= */
 
-  const routeWebRTCAnswer = (
-    data = {}
-  ) => {
-    const {
-      streamId: sid,
-      roomId,
-      answer,
-      to,
-      targetSocketId: targetId
-    } = data;
+    const routeWebRTCOffer = (
+      data = {}
+    ) => {
+      const {
+        streamId: sid,
+        roomId,
+        offer,
+        targetViewerId,
+        to,
+        guestId,
+        mode
+      } = data;
 
-    const activeRoom =
-      roomId || sid;
+      const activeRoom =
+        roomId || sid;
 
-    const destination =
-      resolveSocket(
-        to || targetId
-      );
+      const targetId =
+        targetViewerId || to;
 
-    const payload = {
-      answer,
-      viewerSocketId:
-        socket.id,
-      senderSocketId:
-        socket.id
-    };
-
-    console.log(
-      `📥 WebRTC answer from ${socket.id} -> ${to || targetId || activeRoom || 'none'}`
-    );
-
-    if (
-      destination &&
-      destination !==
-        socket.id
-    ) {
-      io.to(
-        destination
-      ).emit(
-        'webrtc_answer_received',
-        payload
-      );
-    } else if (activeRoom) {
-      socket.to(
-        activeRoom
-      ).emit(
-        'webrtc_answer_received',
-        payload
-      );
-    }
-  };
-
-  const routeWebRTCIce = (
-    data = {}
-  ) => {
-    const {
-      streamId: sid,
-      roomId,
-      candidate,
-      targetSocketId,
-      to,
-      senderType
-    } = data;
-
-    const activeRoom =
-      roomId || sid;
-
-    const destination =
-      resolveSocket(
-        to || targetSocketId
-      );
-
-    const payload = {
-      candidate,
-      senderType,
-      senderSocketId:
-        socket.id
-    };
-
-    if (
-      destination &&
-      destination !==
-        socket.id
-    ) {
-      io.to(
-        destination
-      ).emit(
-        'incoming_ice_candidate',
-        payload
-      );
-    } else if (activeRoom) {
-      socket.to(
-        activeRoom
-      ).emit(
-        'incoming_ice_candidate',
-        payload
-      );
-    }
-  };
-
-  socket.on(
-    'send_webrtc_offer',
-    routeWebRTCOffer
-  );
-
-  socket.on(
-    'send_webrtc_answer',
-    routeWebRTCAnswer
-  );
-
-  socket.on(
-    'webrtc_ice_candidate',
-    routeWebRTCIce
-  );
-
-  /* Legacy aliases */
-
-  socket.on(
-    'webrtc_offer',
-    routeWebRTCOffer
-  );
-
-  socket.on(
-    'webrtc_answer',
-    routeWebRTCAnswer
-  );
-
-  socket.on(
-    'send_ice_candidate',
-    routeWebRTCIce
-  );
-
-  socket.on(
-    'ice_candidate',
-    routeWebRTCIce
-  );
-
-  /* =======================================================
-     CHAT / PRESENCE
-  ======================================================= */
-
-  socket.on(
-    'user_going_online',
-    (userId) => {
-      if (!userId) {
-        return;
-      }
-
-      socket.userId =
-        String(userId);
-
-      activeUsers.set(
-        String(userId),
-        socket.id
-      );
-
-      io.emit(
-        'friend_presence_changed',
-        {
-          userId,
-          status:
-            'online'
-        }
-      );
-    }
-  );
-
-  socket.on(
-    'send_chat_message',
-    (messagePayload = {}) => {
       const targetSocketId =
         resolveSocket(
-          messagePayload.receiver_id
+          targetId
         );
 
-      if (targetSocketId) {
-        io.to(
-          targetSocketId
-        ).emit(
-          'received_chat_message',
-          messagePayload
-        );
-      }
-    }
-  );
+      const payload = {
+        offer,
+        guestId:
+          guestId ||
+          socket.userId ||
+          socket.id,
+        mode:
+          mode || 'video',
+        hostSocketId:
+          socket.id,
+        senderSocketId:
+          socket.id
+      };
 
-  socket.on(
-    'broadcast_message_update',
-    (updatedPayload = {}) => {
-      const targetSocketId =
-        resolveSocket(
-          updatedPayload.receiver_id
-        );
-
-      if (targetSocketId) {
-        io.to(
-          targetSocketId
-        ).emit(
-          'message_updated_realtime',
-          updatedPayload
-        );
-      }
-    }
-  );
-
-  socket.on(
-    'user_typing_state',
-    ({
-      userId,
-      isTyping,
-      mode
-    } = {}) => {
-      socket.broadcast.emit(
-        'peer_typing_state_changed',
-        {
-          userId,
-          isTyping,
-          mode
-        }
-      );
-    }
-  );
-
-  /* =======================================================
-     DISCONNECT CLEANUP
-  ======================================================= */
-
-  socket.on(
-    'disconnect',
-    () => {
       console.log(
-        `❌ Disconnected: Socket ${socket.id}`
+        `📤 WebRTC offer from ${socket.id} -> ${targetId || activeRoom || 'none'}`
       );
 
       if (
-        room &&
-        (
-          role === 'viewer' ||
-          role === 'signal-viewer'
-        )
+        targetSocketId &&
+        targetSocketId !==
+          socket.id
       ) {
-        broadcastRoomPresence(
-          room
+        io.to(
+          targetSocketId
+        ).emit(
+          'webrtc_offer_received',
+          payload
+        );
+      } else if (
+        activeRoom
+      ) {
+        socket.to(
+          activeRoom
+        ).emit(
+          'webrtc_offer_received',
+          payload
         );
       }
+    };
+
+    const routeWebRTCAnswer = (
+      data = {}
+    ) => {
+      const {
+        streamId: sid,
+        roomId,
+        answer,
+        to,
+        targetSocketId: targetId
+      } = data;
+
+      const activeRoom =
+        roomId || sid;
+
+      const destination =
+        resolveSocket(
+          to || targetId
+        );
+
+      const payload = {
+        answer,
+        viewerSocketId:
+          socket.id,
+        senderSocketId:
+          socket.id
+      };
+
+      console.log(
+        `📥 WebRTC answer from ${socket.id} -> ${to || targetId || activeRoom || 'none'}`
+      );
 
       if (
-        socket.data?.isGuestPanel &&
-        socket.data?.streamId
+        destination &&
+        destination !==
+          socket.id
       ) {
-        const roomState =
-          streamRooms.get(
-            socket.data.streamId
+        io.to(
+          destination
+        ).emit(
+          'webrtc_answer_received',
+          payload
+        );
+      } else if (
+        activeRoom
+      ) {
+        socket.to(
+          activeRoom
+        ).emit(
+          'webrtc_answer_received',
+          payload
+        );
+      }
+    };
+
+    const routeWebRTCIce = (
+      data = {}
+    ) => {
+      const {
+        streamId: sid,
+        roomId,
+        candidate,
+        targetSocketId,
+        to,
+        senderType
+      } = data;
+
+      const activeRoom =
+        roomId || sid;
+
+      const destination =
+        resolveSocket(
+          to || targetSocketId
+        );
+
+      const payload = {
+        candidate,
+        senderType,
+        senderSocketId:
+          socket.id
+      };
+
+      if (
+        destination &&
+        destination !==
+          socket.id
+      ) {
+        io.to(
+          destination
+        ).emit(
+          'incoming_ice_candidate',
+          payload
+        );
+      } else if (
+        activeRoom
+      ) {
+        socket.to(
+          activeRoom
+        ).emit(
+          'incoming_ice_candidate',
+          payload
+        );
+      }
+    };
+
+    socket.on(
+      'send_webrtc_offer',
+      routeWebRTCOffer
+    );
+
+    socket.on(
+      'send_webrtc_answer',
+      routeWebRTCAnswer
+    );
+
+    socket.on(
+      'webrtc_ice_candidate',
+      routeWebRTCIce
+    );
+
+    /* Legacy aliases */
+
+    socket.on(
+      'webrtc_offer',
+      routeWebRTCOffer
+    );
+
+    socket.on(
+      'webrtc_answer',
+      routeWebRTCAnswer
+    );
+
+    socket.on(
+      'send_ice_candidate',
+      routeWebRTCIce
+    );
+
+    socket.on(
+      'ice_candidate',
+      routeWebRTCIce
+    );
+
+    /* =======================================================
+       CHAT / PRESENCE
+    ======================================================= */
+
+    socket.on(
+      'user_going_online',
+      (userId) => {
+        if (!userId) {
+          return;
+        }
+
+        socket.userId =
+          String(userId);
+
+        activeUsers.set(
+          String(userId),
+          socket.id
+        );
+
+        io.emit(
+          'friend_presence_changed',
+          {
+            userId,
+            status:
+              'online'
+          }
+        );
+      }
+    );
+
+    socket.on(
+      'send_chat_message',
+      (messagePayload = {}) => {
+        const targetSocketId =
+          resolveSocket(
+            messagePayload.receiver_id
           );
 
-        if (roomState) {
-          roomState.guestPanels.delete(
-            socket.data.guestId
+        if (
+          targetSocketId
+        ) {
+          io.to(
+            targetSocketId
+          ).emit(
+            'received_chat_message',
+            messagePayload
           );
+        }
+      }
+    );
+
+    socket.on(
+      'broadcast_message_update',
+      (updatedPayload = {}) => {
+        const targetSocketId =
+          resolveSocket(
+            updatedPayload.receiver_id
+          );
+
+        if (
+          targetSocketId
+        ) {
+          io.to(
+            targetSocketId
+          ).emit(
+            'message_updated_realtime',
+            updatedPayload
+          );
+        }
+      }
+    );
+
+    socket.on(
+      'user_typing_state',
+      ({
+        userId,
+        isTyping,
+        mode
+      } = {}) => {
+        socket.broadcast.emit(
+          'peer_typing_state_changed',
+          {
+            userId,
+            isTyping,
+            mode
+          }
+        );
+      }
+    );
+
+    /* =======================================================
+       DISCONNECT CLEANUP
+    ======================================================= */
+
+    socket.on(
+      'disconnect',
+      () => {
+        console.log(
+          `❌ Disconnected: Socket ${socket.id}`
+        );
+
+        if (
+          room &&
+          (
+            role === 'viewer' ||
+            role === 'signal-viewer'
+          )
+        ) {
+          broadcastRoomPresence(
+            room
+          );
+        }
+
+        if (
+          socket.data?.isGuestPanel &&
+          socket.data?.streamId
+        ) {
+          const roomState =
+            streamRooms.get(
+              socket.data.streamId
+            );
+
+          if (roomState) {
+            roomState.guestPanels.delete(
+              socket.data.guestId
+            );
+
+            if (
+              roomState.hostSocketId
+            ) {
+              io.to(
+                roomState.hostSocketId
+              ).emit(
+                'guest_panel_disconnected',
+                {
+                  guestId:
+                    socket.data.guestId
+                }
+              );
+            }
+          }
+        }
+
+        if (
+          socket.hostIdentifier
+        ) {
+          const hostKey =
+            String(
+              socket.hostIdentifier
+            );
 
           if (
-            roomState.hostSocketId
+            activeUsers.get(
+              hostKey
+            ) === socket.id
           ) {
-            io.to(
-              roomState.hostSocketId
-            ).emit(
-              'guest_panel_disconnected',
+            activeUsers.delete(
+              hostKey
+            );
+          }
+
+          const roomState =
+            streamRooms.get(
+              hostKey
+            );
+
+          if (
+            roomState &&
+            roomState.hostSocketId ===
+              socket.id
+          ) {
+            streamRooms.delete(
+              hostKey
+            );
+          }
+        }
+
+        forgetSocketFromCallRooms(
+          socket.id
+        );
+
+        if (
+          socket.userId
+        ) {
+          const userKey =
+            String(
+              socket.userId
+            );
+
+          if (
+            activeUsers.get(
+              userKey
+            ) === socket.id
+          ) {
+            activeUsers.delete(
+              userKey
+            );
+
+            io.emit(
+              'friend_presence_changed',
               {
-                guestId:
-                  socket.data.guestId
+                userId:
+                  socket.userId,
+                status:
+                  'offline'
               }
             );
           }
         }
       }
-
-      if (
-        socket.hostIdentifier
-      ) {
-        const hostKey =
-          String(
-            socket.hostIdentifier
-          );
-
-        if (
-          activeUsers.get(
-            hostKey
-          ) === socket.id
-        ) {
-          activeUsers.delete(
-            hostKey
-          );
-        }
-
-        const roomState =
-          streamRooms.get(
-            hostKey
-          );
-
-        if (
-          roomState &&
-          roomState.hostSocketId ===
-            socket.id
-        ) {
-          streamRooms.delete(
-            hostKey
-          );
-        }
-      }
-
-      forgetSocketFromCallRooms(
-        socket.id
-      );
-
-      if (socket.userId) {
-        const userKey =
-          String(
-            socket.userId
-          );
-
-        if (
-          activeUsers.get(
-            userKey
-          ) === socket.id
-        ) {
-          activeUsers.delete(
-            userKey
-          );
-
-          io.emit(
-            'friend_presence_changed',
-            {
-              userId:
-                socket.userId,
-              status:
-                'offline'
-            }
-          );
-        }
-      }
-    }
-  );
-});
+    );
+  }
+);
 
 /* =========================================================
    SERVER START
@@ -2734,6 +3121,10 @@ http.listen(
 
     console.log(
       '🎬 Video merge routes: /api/merge-video + /api/storage/merge-video'
+    );
+
+    console.log(
+      '⚡ Fast video publishing path: ENABLED'
     );
   }
 );
