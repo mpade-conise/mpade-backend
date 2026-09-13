@@ -45,14 +45,7 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-
-/*
- * IMPORTANT:
- * Express 5 / newer path-to-regexp versions do not accept '*'
- * here. The regex route handles all OPTIONS requests safely.
- */
 app.options(/.*/, cors(corsOptions));
-
 app.use(express.json({ limit: '2mb' }));
 
 /* =========================================================
@@ -139,7 +132,9 @@ const authenticateSupabaseUser = async (req, res, next) => {
     }
 
     if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
-      console.error('❌ SUPABASE_URL or SUPABASE_ANON_KEY is missing.');
+      console.error(
+        '❌ SUPABASE_URL or SUPABASE_ANON_KEY is missing.'
+      );
 
       return res.status(503).json({
         error: 'Storage authentication is not configured on the server.',
@@ -453,13 +448,78 @@ const processVideoWithFFmpeg = ({
   sourcePath,
   audioPath,
   outputPath,
-  videoVolume,
-  musicVolume,
-  audioEnhancement,
-  filter
+  videoVolume = 1,
+  musicVolume = 1,
+  audioEnhancement = 'none',
+  filter = 'none'
 }) => {
   return new Promise((resolve, reject) => {
     const hasMusic = Boolean(audioPath);
+
+    const safeVideoVolume = Math.max(
+      0,
+      Math.min(2, Number(videoVolume) || 1)
+    );
+
+    const safeMusicVolume = Math.max(
+      0,
+      Math.min(2, Number(musicVolume) || 1)
+    );
+
+    const normalizedFilter =
+      typeof filter === 'string'
+        ? filter.trim().toLowerCase()
+        : 'none';
+
+    const normalizedEnhancement =
+      typeof audioEnhancement === 'string'
+        ? audioEnhancement.trim().toLowerCase()
+        : 'none';
+
+    const allowedFilters = new Set([
+      'none',
+      'normal',
+      'grayscale',
+      'sepia',
+      'vivid',
+      'bright',
+      'dark',
+      'warm',
+      'cool'
+    ]);
+
+    const allowedEnhancements = new Set([
+      'none',
+      'crystal_voice',
+      'studio_master',
+      'bass_boost'
+    ]);
+
+    const safeFilter = allowedFilters.has(normalizedFilter)
+      ? normalizedFilter
+      : 'none';
+
+    const safeEnhancement = allowedEnhancements.has(
+      normalizedEnhancement
+    )
+      ? normalizedEnhancement
+      : 'none';
+
+    const videoFilterMap = {
+      grayscale: 'hue=s=0',
+      sepia:
+        'colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131',
+      vivid:
+        'eq=contrast=1.12:saturation=1.25:brightness=0.02',
+      bright:
+        'eq=brightness=0.08:contrast=1.05',
+      dark:
+        'eq=brightness=-0.08:contrast=1.05',
+      warm:
+        'colorbalance=rs=.08:gs=.03:bs=-.03',
+      cool:
+        'colorbalance=rs=-.03:gs=.03:bs=.08'
+    };
 
     let command = ffmpeg(sourcePath);
 
@@ -467,126 +527,13 @@ const processVideoWithFFmpeg = ({
       command = command.input(audioPath);
     }
 
-    const filters = [];
-
-    const safeVideoVolume = Math.max(
-      0,
-      Math.min(2, Number(videoVolume ?? 1))
-    );
-
-    const safeMusicVolume = Math.max(
-      0,
-      Math.min(2, Number(musicVolume ?? 1))
-    );
-
-    if (filter && typeof filter === 'string') {
-      const normalizedFilter = filter
-        .trim()
-        .toLowerCase();
-
-      const videoFilters = {
-        none: null,
-        normal: null,
-        grayscale: 'hue=s=0',
-        sepia:
-          'colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131',
-        vivid:
-          'eq=contrast=1.12:saturation=1.25:brightness=0.02',
-        bright:
-          'eq=brightness=0.08:contrast=1.05',
-        dark:
-          'eq=brightness=-0.08:contrast=1.05',
-        warm:
-          'colorbalance=rs=.08:gs=.03:bs=-.03',
-        cool:
-          'colorbalance=rs=-.03:gs=.03:bs=.08'
-      };
-
-      if (videoFilters[normalizedFilter]) {
-        filters.push(
-          videoFilters[normalizedFilter]
-        );
-      }
-    }
-
-    if (filters.length) {
-      command.videoFilters(filters);
-    }
-
-    if (hasMusic) {
-      const audioFilters = [];
-
-      audioFilters.push(
-        `[0:a]volume=${safeVideoVolume}[original_audio]`
-      );
-
-      audioFilters.push(
-        `[1:a]volume=${safeMusicVolume}[music_audio]`
-      );
-
-      if (audioEnhancement === 'crystal_voice') {
-        audioFilters.push(
-          '[original_audio]highpass=f=80,lowpass=f=12000,acompressor=threshold=-18dB:ratio=3:attack=20:release=250[voice_processed]'
-        );
-
-        audioFilters.push(
-          '[voice_processed][music_audio]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mixed_audio]'
-        );
-      } else if (
-        audioEnhancement === 'studio_master'
-      ) {
-        audioFilters.push(
-          '[original_audio]highpass=f=50,lowpass=f=16000,acompressor=threshold=-16dB:ratio=2.5:attack=15:release=200,equalizer=f=3000:t=q:w=1:g=2[voice_processed]'
-        );
-
-        audioFilters.push(
-          '[voice_processed][music_audio]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mixed_audio]'
-        );
-      } else if (
-        audioEnhancement === 'bass_boost'
-      ) {
-        audioFilters.push(
-          '[original_audio]bass=g=5:f=100[voice_processed]'
-        );
-
-        audioFilters.push(
-          '[voice_processed][music_audio]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mixed_audio]'
-        );
-      } else {
-        audioFilters.push(
-          '[original_audio][music_audio]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mixed_audio]'
+    if (!hasMusic) {
+      if (videoFilterMap[safeFilter]) {
+        command.videoFilters(
+          videoFilterMap[safeFilter]
         );
       }
 
-      command.complexFilter(
-        audioFilters,
-        'mixed_audio'
-      );
-
-      command.outputOptions([
-        '-map',
-        '0:v:0',
-        '-map',
-        '[mixed_audio]',
-        '-c:v',
-        'libx264',
-        '-preset',
-        'veryfast',
-        '-crf',
-        '23',
-        '-pix_fmt',
-        'yuv420p',
-        '-c:a',
-        'aac',
-        '-b:a',
-        '128k',
-        '-movflags',
-        '+faststart',
-        '-shortest',
-        '-map_metadata',
-        '-1'
-      ]);
-    } else {
       command.outputOptions([
         '-map',
         '0:v:0',
@@ -609,6 +556,74 @@ const processVideoWithFFmpeg = ({
         '-map_metadata',
         '-1'
       ]);
+    } else {
+      const filterGraph = [];
+
+      if (videoFilterMap[safeFilter]) {
+        filterGraph.push(
+          `[0:v:0]${videoFilterMap[safeFilter]}[processed_video]`
+        );
+      } else {
+        filterGraph.push(
+          '[0:v:0]null[processed_video]'
+        );
+      }
+
+      filterGraph.push(
+        `[0:a:0]volume=${safeVideoVolume}[original_audio]`
+      );
+
+      filterGraph.push(
+        `[1:a:0]volume=${safeMusicVolume}[music_audio]`
+      );
+
+      if (safeEnhancement === 'crystal_voice') {
+        filterGraph.push(
+          '[original_audio]highpass=f=80,lowpass=f=12000,acompressor=threshold=-18dB:ratio=3:attack=20:release=250[enhanced_audio]'
+        );
+      } else if (safeEnhancement === 'studio_master') {
+        filterGraph.push(
+          '[original_audio]highpass=f=50,lowpass=f=16000,acompressor=threshold=-16dB:ratio=2.5:attack=15:release=200,equalizer=f=3000:t=q:w=1:g=2[enhanced_audio]'
+        );
+      } else if (safeEnhancement === 'bass_boost') {
+        filterGraph.push(
+          '[original_audio]bass=g=5:f=100[enhanced_audio]'
+        );
+      } else {
+        filterGraph.push(
+          '[original_audio]anull[enhanced_audio]'
+        );
+      }
+
+      filterGraph.push(
+        '[enhanced_audio][music_audio]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[mixed_audio]'
+      );
+
+      command.complexFilter(filterGraph);
+
+      command.outputOptions([
+        '-map',
+        '[processed_video]',
+        '-map',
+        '[mixed_audio]',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '23',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        '-movflags',
+        '+faststart',
+        '-shortest',
+        '-map_metadata',
+        '-1'
+      ]);
     }
 
     command
@@ -620,9 +635,7 @@ const processVideoWithFFmpeg = ({
       .on('progress', (progress) => {
         if (progress.percent !== undefined) {
           console.log(
-            `🎬 FFmpeg progress: ${Number(
-              progress.percent
-            ).toFixed(1)}%`
+            `🎬 FFmpeg progress: ${Number(progress.percent).toFixed(1)}%`
           );
         }
       })
@@ -632,13 +645,25 @@ const processVideoWithFFmpeg = ({
           error.message
         );
 
-        if (stderr) {
+        if (stdout) {
           console.error(
-            stderr.slice(-4000)
+            'FFmpeg stdout:',
+            stdout.slice(-4000)
           );
         }
 
-        reject(error);
+        if (stderr) {
+          console.error(
+            'FFmpeg stderr:',
+            stderr.slice(-8000)
+          );
+        }
+
+        reject(
+          new Error(
+            `ffmpeg exited with code 1: ${error.message}`
+          )
+        );
       })
       .on('end', () => {
         console.log(
