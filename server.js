@@ -18,6 +18,8 @@ const ffmpeg = require('fluent-ffmpeg');
 const app = express();
 const http = require('http').createServer(app);
 
+app.disable('x-powered-by');
+
 const ALLOWED_ORIGINS = [
   'https://progress-lake.vercel.app',
   'http://localhost:5173'
@@ -34,21 +36,26 @@ const ALLOWED_STORAGE_FOLDERS = new Set([
 
 const MAX_UPLOAD_SIZE = 1024 * 1024 * 1024;
 
-app.use(cors({
+const corsOptions = {
   origin: ALLOWED_ORIGINS,
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  credentials: true
-}));
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+  optionsSuccessStatus: 204
+};
 
+app.use(cors(corsOptions));
 app.use(express.json({ limit: '2mb' }));
 
 const systemFfmpegPath = '/usr/bin/ffmpeg';
 
 if (fs.existsSync(systemFfmpegPath)) {
   ffmpeg.setFfmpegPath(systemFfmpegPath);
-  console.log(`🚀 FFmpeg path successfully mapped to system production binary: ${systemFfmpegPath}`);
+  console.log(`🚀 FFmpeg mapped to ${systemFfmpegPath}`);
 } else {
-  console.log('ℹ️ Local environment detected or custom package path applied.');
+  console.log(
+    'ℹ️ System FFmpeg not found; using fluent-ffmpeg default configuration.'
+  );
 }
 
 const io = require('socket.io')(http, {
@@ -80,13 +87,15 @@ if (b2Configured) {
       accessKeyId: process.env.B2_KEY_ID,
       secretAccessKey: process.env.B2_APPLICATION_KEY
     },
-    forcePathStyle: true
+    forcePathStyle: true,
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED'
   });
 
   console.log('☁️ Backblaze B2 storage client initialized.');
 } else {
   console.warn(
-    '⚠️ Backblaze B2 environment variables are incomplete. B2 storage routes will remain unavailable.'
+    '⚠️ Backblaze B2 environment variables are incomplete.'
   );
 }
 
@@ -115,9 +124,12 @@ const authenticateSupabaseUser = async (req, res, next) => {
       });
     }
 
-    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_ANON_KEY) {
+    if (
+      !process.env.SUPABASE_URL ||
+      !process.env.SUPABASE_ANON_KEY
+    ) {
       console.error(
-        '❌ SUPABASE_URL or SUPABASE_ANON_KEY is missing on backend.'
+        '❌ SUPABASE_URL or SUPABASE_ANON_KEY is missing.'
       );
 
       return res.status(503).json({
@@ -128,13 +140,16 @@ const authenticateSupabaseUser = async (req, res, next) => {
 
     const supabaseUrl = process.env.SUPABASE_URL.replace(/\/+$/, '');
 
-    const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        apikey: process.env.SUPABASE_ANON_KEY
+    const response = await fetch(
+      `${supabaseUrl}/auth/v1/user`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          apikey: process.env.SUPABASE_ANON_KEY
+        }
       }
-    });
+    );
 
     if (!response.ok) {
       return res.status(401).json({
@@ -154,7 +169,7 @@ const authenticateSupabaseUser = async (req, res, next) => {
 
     req.authUser = user;
 
-    next();
+    return next();
   } catch (error) {
     console.error(
       '❌ Supabase authentication error:',
@@ -176,7 +191,7 @@ const requireB2 = (req, res, next) => {
     });
   }
 
-  next();
+  return next();
 };
 
 /* =========================================================
@@ -198,7 +213,9 @@ const sanitizeFileName = (fileName) => {
 };
 
 const getExtension = (fileName) => {
-  const ext = path.extname(String(fileName || '')).toLowerCase();
+  const ext = path
+    .extname(String(fileName || ''))
+    .toLowerCase();
 
   if (!ext || ext.length > 12) {
     return '';
@@ -212,7 +229,7 @@ const isValidContentType = (contentType) => {
     return false;
   }
 
-  return /^[a-zA-Z0-9!#$&^*.+-]+\/[a-zA-Z0-9!#$&^*.+-]+$/.test(
+  return /^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(
     contentType
   );
 };
@@ -237,7 +254,15 @@ const parseStorageObjectKey = (objectKey) => {
 
   const parts = normalizedKey.split('/');
 
-  if (parts.length < 3) {
+  if (
+    parts.length < 3 ||
+    parts.some(
+      (part) =>
+        !part ||
+        part === '.' ||
+        part === '..'
+    )
+  ) {
     return null;
   }
 
@@ -259,7 +284,28 @@ const parseStorageObjectKey = (objectKey) => {
 };
 
 /* =========================================================
-   HEALTH CHECK
+   URL VALIDATION
+========================================================= */
+
+const isHttpUrl = (value) => {
+  if (!value || typeof value !== 'string') {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(value);
+
+    return (
+      parsed.protocol === 'http:' ||
+      parsed.protocol === 'https:'
+    );
+  } catch {
+    return false;
+  }
+};
+
+/* =========================================================
+   HEALTH
 ========================================================= */
 
 app.get('/', (req, res) => {
@@ -273,15 +319,13 @@ app.get('/', (req, res) => {
   });
 });
 
-/* =========================================================
-   B2 HEALTH CHECK
-========================================================= */
-
 app.get('/api/storage/status', (req, res) => {
   res.json({
     configured: b2Configured,
     provider: 'Backblaze B2',
-    bucket: b2Configured ? process.env.B2_BUCKET : null,
+    bucket: b2Configured
+      ? process.env.B2_BUCKET
+      : null,
     region: b2Configured
       ? process.env.B2_REGION || 'us-east-005'
       : null
@@ -290,10 +334,6 @@ app.get('/api/storage/status', (req, res) => {
 
 /* =========================================================
    B2 SIGNED UPLOAD URL
-
-   React requests a temporary signed URL.
-   Browser uploads directly to B2.
-   B2 credentials NEVER reach React/Vercel.
 ========================================================= */
 
 app.post(
@@ -321,12 +361,19 @@ app.post(
         });
       }
 
-      const normalizedFolder = String(folder).toLowerCase();
+      const normalizedFolder =
+        String(folder).toLowerCase();
 
-      if (!ALLOWED_STORAGE_FOLDERS.has(normalizedFolder)) {
+      if (
+        !ALLOWED_STORAGE_FOLDERS.has(
+          normalizedFolder
+        )
+      ) {
         return res.status(400).json({
           error: 'Invalid storage folder.',
-          allowedFolders: Array.from(ALLOWED_STORAGE_FOLDERS)
+          allowedFolders: Array.from(
+            ALLOWED_STORAGE_FOLDERS
+          )
         });
       }
 
@@ -350,20 +397,17 @@ app.post(
 
       const userId = req.authUser.id;
 
-      const objectKey = createStorageObjectKey(
-        userId,
-        normalizedFolder,
-        fileName
-      );
+      const objectKey =
+        createStorageObjectKey(
+          userId,
+          normalizedFolder,
+          fileName
+        );
 
       const command = new PutObjectCommand({
         Bucket: process.env.B2_BUCKET,
         Key: objectKey,
-        ContentType: contentType,
-        Metadata: {
-          uploadedby: userId,
-          originalname: sanitizeFileName(fileName)
-        }
+        ContentType: contentType
       });
 
       const uploadUrl = await getSignedUrl(
@@ -381,6 +425,9 @@ app.post(
         expiresIn: 900,
         bucket: process.env.B2_BUCKET,
         contentType,
+        uploadHeaders: {
+          'Content-Type': contentType
+        },
         folder: normalizedFolder
       });
     } catch (error) {
@@ -399,8 +446,6 @@ app.post(
 
 /* =========================================================
    B2 SIGNED DOWNLOAD URL
-
-   Currently restricted to the authenticated owner.
 ========================================================= */
 
 app.post(
@@ -420,9 +465,8 @@ app.post(
         });
       }
 
-      const parsed = parseStorageObjectKey(
-        objectKey
-      );
+      const parsed =
+        parseStorageObjectKey(objectKey);
 
       if (!parsed) {
         return res.status(400).json({
@@ -430,9 +474,10 @@ app.post(
         });
       }
 
-      const userId = req.authUser.id;
-
-      if (parsed.ownerId !== userId) {
+      if (
+        parsed.ownerId !==
+        req.authUser.id
+      ) {
         return res.status(403).json({
           error:
             'You do not have permission to access this object.',
@@ -440,23 +485,26 @@ app.post(
         });
       }
 
-      const command = new GetObjectCommand({
-        Bucket: process.env.B2_BUCKET,
-        Key: parsed.normalizedKey
-      });
+      const command =
+        new GetObjectCommand({
+          Bucket: process.env.B2_BUCKET,
+          Key: parsed.normalizedKey
+        });
 
-      const downloadUrl = await getSignedUrl(
-        b2,
-        command,
-        {
-          expiresIn: 900
-        }
-      );
+      const downloadUrl =
+        await getSignedUrl(
+          b2,
+          command,
+          {
+            expiresIn: 900
+          }
+        );
 
       return res.json({
         success: true,
         downloadUrl,
-        objectKey: parsed.normalizedKey,
+        objectKey:
+          parsed.normalizedKey,
         expiresIn: 900
       });
     } catch (error) {
@@ -466,7 +514,8 @@ app.post(
       );
 
       return res.status(500).json({
-        error: 'Unable to create B2 download URL.',
+        error:
+          'Unable to create B2 download URL.',
         details: error.message
       });
     }
@@ -494,9 +543,8 @@ app.delete(
         });
       }
 
-      const parsed = parseStorageObjectKey(
-        objectKey
-      );
+      const parsed =
+        parseStorageObjectKey(objectKey);
 
       if (!parsed) {
         return res.status(400).json({
@@ -504,7 +552,10 @@ app.delete(
         });
       }
 
-      if (parsed.ownerId !== req.authUser.id) {
+      if (
+        parsed.ownerId !==
+        req.authUser.id
+      ) {
         return res.status(403).json({
           error:
             'You do not have permission to delete this object.',
@@ -522,7 +573,8 @@ app.delete(
       return res.json({
         success: true,
         deleted: true,
-        objectKey: parsed.normalizedKey
+        objectKey:
+          parsed.normalizedKey
       });
     } catch (error) {
       console.error(
@@ -531,7 +583,8 @@ app.delete(
       );
 
       return res.status(500).json({
-        error: 'Unable to delete B2 object.',
+        error:
+          'Unable to delete B2 object.',
         details: error.message
       });
     }
@@ -539,12 +592,13 @@ app.delete(
 );
 
 /* =========================================================
-   VIDEO / AUDIO MERGE ENDPOINT
-
-   Existing functionality preserved.
+   VIDEO / AUDIO MERGE
 ========================================================= */
 
-app.post('/api/merge-video', async (req, res) => {
+const mergeVideoHandler = async (
+  req,
+  res
+) => {
   const {
     videoUrl,
     audioUrl
@@ -552,27 +606,47 @@ app.post('/api/merge-video', async (req, res) => {
 
   if (!videoUrl) {
     return res.status(400).json({
-      error: 'Missing source videoUrl field.'
+      error:
+        'Missing source videoUrl field.'
+    });
+  }
+
+  if (!isHttpUrl(videoUrl)) {
+    return res.status(400).json({
+      error:
+        'Invalid videoUrl. HTTP or HTTPS URL required.'
+    });
+  }
+
+  if (
+    audioUrl !== undefined &&
+    audioUrl !== null &&
+    audioUrl !== '' &&
+    !isHttpUrl(String(audioUrl))
+  ) {
+    return res.status(400).json({
+      error:
+        'Invalid audioUrl. HTTP or HTTPS URL required.'
     });
   }
 
   const outputFilename =
-    `merged_${Date.now()}_${Math.floor(Math.random() * 1000)}.mp4`;
+    `merged_${Date.now()}_${Math.floor(
+      Math.random() * 1000
+    )}.mp4`;
 
-  const outputPath = path.join(
-    os.tmpdir(),
-    outputFilename
-  );
+  const outputPath =
+    path.join(
+      os.tmpdir(),
+      outputFilename
+    );
 
-  let ffmpegCommand;
+  let responseFinished = false;
 
   const cleanupOutput = () => {
     try {
       if (fs.existsSync(outputPath)) {
         fs.unlinkSync(outputPath);
-        console.log(
-          '🗑️ Cleaned up temporary FFmpeg file.'
-        );
       }
     } catch (cleanupError) {
       console.error(
@@ -582,8 +656,26 @@ app.post('/api/merge-video', async (req, res) => {
     }
   };
 
+  const sendProcessingError = (
+    status,
+    message
+  ) => {
+    if (
+      responseFinished ||
+      res.headersSent
+    ) {
+      return;
+    }
+
+    responseFinished = true;
+
+    return res.status(status).json({
+      error: message
+    });
+  };
+
   try {
-    ffmpegCommand = ffmpeg()
+    let command = ffmpeg()
       .input(videoUrl)
       .inputOptions([
         '-protocol_whitelist',
@@ -592,58 +684,51 @@ app.post('/api/merge-video', async (req, res) => {
         '+genpts'
       ]);
 
-    let hasCustomAudio = false;
-
-    if (audioUrl) {
-      const cleanAudioStr = String(audioUrl)
-        .trim()
-        .toLowerCase();
-
-      if (
-        cleanAudioStr !== '' &&
-        cleanAudioStr !== 'null' &&
-        cleanAudioStr !== 'undefined'
-      ) {
-        hasCustomAudio = true;
-      }
-    }
+    const hasCustomAudio =
+      audioUrl &&
+      !['null', 'undefined'].includes(
+        String(audioUrl)
+          .trim()
+          .toLowerCase()
+      );
 
     if (hasCustomAudio) {
       console.log(
-        '🎵 Custom embedded audio track detected. Multiplexing audio stream layers...'
+        '🎵 Custom audio detected. Merging audio into video.'
       );
 
-      ffmpegCommand
+      command = command
         .input(audioUrl)
         .inputOptions([
           '-protocol_whitelist',
           'file,http,https,tcp,tls,crypto',
           '-user_agent',
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/91.0.4472.124 Safari/537.36'
-        ])
-        .outputOptions([
-          '-c:v',
-          'copy',
-          '-c:a',
-          'aac',
-          '-b:a',
-          '128k',
-          '-map',
-          '0:v:0',
-          '-map',
-          '1:a:0',
-          '-map_metadata',
-          '-1',
-          '-movflags',
-          '+faststart',
-          '-shortest'
+          'Mozilla/5.0'
         ]);
+
+      command.outputOptions([
+        '-c:v',
+        'copy',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '128k',
+        '-map',
+        '0:v:0',
+        '-map',
+        '1:a:0',
+        '-map_metadata',
+        '-1',
+        '-movflags',
+        '+faststart',
+        '-shortest'
+      ]);
     } else {
       console.log(
-        '🗣️ Original native sound verified. Copying source media tracks directly...'
+        '🗣️ No custom audio supplied. Copying original media tracks.'
       );
 
-      ffmpegCommand.outputOptions([
+      command.outputOptions([
         '-c:v',
         'copy',
         '-c:a',
@@ -653,41 +738,58 @@ app.post('/api/merge-video', async (req, res) => {
       ]);
     }
 
-    ffmpegCommand
+    command
       .toFormat('mp4')
       .on('start', () => {
         console.log(
-          '🎬 Started Video Pipeline Processing to Disk...'
+          `🎬 Started video processing: ${outputFilename}`
         );
       })
       .on('error', (err) => {
         console.error(
-          '❌ Server-Side Video Processing Pipeline Error:',
+          '❌ FFmpeg error:',
           err.message
         );
 
         cleanupOutput();
 
-        if (!res.headersSent) {
-          res.status(500).json({
-            error:
-              `Video generation pipeline encountered an issue: ${err.message}`
-          });
-        }
+        sendProcessingError(
+          500,
+          `Video generation pipeline encountered an issue: ${err.message}`
+        );
       })
       .on('end', () => {
+        if (
+          responseFinished ||
+          res.headersSent
+        ) {
+          cleanupOutput();
+          return;
+        }
+
+        if (
+          !fs.existsSync(outputPath)
+        ) {
+          return sendProcessingError(
+            500,
+            'FFmpeg completed but the generated video file was not found.'
+          );
+        }
+
         console.log(
-          '✅ Video successfully generated on disk. Initializing download pipeline transfer...'
+          '✅ Video generated successfully. Starting download.'
         );
+
+        responseFinished = true;
 
         res.download(
           outputPath,
           'Mpade_Export.mp4',
-          (downloadErr) => {
-            if (downloadErr) {
+          (downloadError) => {
+            if (downloadError) {
               console.error(
-                '❌ Error during transmission file transfer:',
-                downloadErr
+                '❌ Error during file transfer:',
+                downloadError.message
               );
             }
 
@@ -704,14 +806,22 @@ app.post('/api/merge-video', async (req, res) => {
 
     cleanupOutput();
 
-    if (!res.headersSent) {
-      return res.status(500).json({
-        error:
-          'Unable to initialize video processing pipeline.'
-      });
-    }
+    return sendProcessingError(
+      500,
+      'Unable to initialize video processing pipeline.'
+    );
   }
-});
+};
+
+app.post(
+  '/api/merge-video',
+  mergeVideoHandler
+);
+
+app.post(
+  '/api/storage/merge-video',
+  mergeVideoHandler
+);
 
 /* =========================================================
    GLOBAL USER / STREAM STATE
@@ -719,6 +829,68 @@ app.post('/api/merge-video', async (req, res) => {
 
 const activeUsers = new Map();
 const streamRooms = new Map();
+const callRooms = new Map();
+
+/* =========================================================
+   SOCKET HELPERS
+========================================================= */
+
+const resolveSocket = (value) => {
+  if (!value) {
+    return null;
+  }
+
+  const stringValue = String(value);
+
+  const directSocket =
+    io.sockets.sockets.get(
+      stringValue
+    );
+
+  if (directSocket) {
+    return directSocket.id;
+  }
+
+  return (
+    activeUsers.get(stringValue) ||
+    null
+  );
+};
+
+const rememberCallRoom = (
+  roomId,
+  socketId
+) => {
+  if (!roomId) {
+    return;
+  }
+
+  if (!callRooms.has(roomId)) {
+    callRooms.set(
+      roomId,
+      new Set()
+    );
+  }
+
+  callRooms
+    .get(roomId)
+    .add(socketId);
+};
+
+const forgetSocketFromCallRooms = (
+  socketId
+) => {
+  for (
+    const [roomId, members]
+    of callRooms
+  ) {
+    members.delete(socketId);
+
+    if (!members.size) {
+      callRooms.delete(roomId);
+    }
+  }
+};
 
 /* =========================================================
    SOCKET.IO
@@ -743,7 +915,7 @@ io.on('connection', (socket) => {
       role === 'host'
     ) {
       const hostIdentifier =
-        streamId || room;
+        String(streamId || room);
 
       activeUsers.set(
         hostIdentifier,
@@ -753,63 +925,72 @@ io.on('connection', (socket) => {
       socket.hostIdentifier =
         hostIdentifier;
 
-      if (!streamRooms.has(hostIdentifier)) {
+      if (
+        !streamRooms.has(
+          hostIdentifier
+        )
+      ) {
         streamRooms.set(
           hostIdentifier,
           {
-            hostSocketId: socket.id,
-            guestPanels: new Map()
+            hostSocketId:
+              socket.id,
+            guestPanels:
+              new Map()
           }
         );
       } else {
         streamRooms.get(
           hostIdentifier
-        ).hostSocketId = socket.id;
+        ).hostSocketId =
+          socket.id;
       }
 
       console.log(
-        `📡 Registered Host globally in active reference index: [${hostIdentifier}] -> Socket ${socket.id}`
+        `📡 Host registered: ${hostIdentifier} -> ${socket.id}`
       );
     }
   } else {
     console.log(
-      `🔌 New client handshaking without room parameter (General Session): ${socket.id}`
+      `🔌 New client without room: ${socket.id}`
     );
   }
 
-  const broadcastRoomPresence = async (
-    roomName
-  ) => {
-    try {
-      const sockets =
-        await io
-          .in(roomName)
-          .fetchSockets();
+  const broadcastRoomPresence =
+    async (roomName) => {
+      try {
+        const sockets =
+          await io
+            .in(roomName)
+            .fetchSockets();
 
-      const viewersList = sockets
-        .filter(
-          (s) =>
-            s.handshake.query.role === 'viewer' ||
-            s.handshake.query.role === 'signal-viewer'
-        )
-        .map((s) => ({
-          socketId: s.id,
-          username:
-            s.handshake.query.username ||
-            'Anonymous'
-        }));
+        const viewersList =
+          sockets
+            .filter(
+              (s) =>
+                s.handshake.query.role ===
+                  'viewer' ||
+                s.handshake.query.role ===
+                  'signal-viewer'
+            )
+            .map((s) => ({
+              socketId: s.id,
+              username:
+                s.handshake.query.username ||
+                'Anonymous'
+            }));
 
-      io.to(roomName).emit(
-        'room_presence_update',
-        viewersList
-      );
-    } catch (err) {
-      console.error(
-        '❌ Presence tracking error:',
-        err
-      );
-    }
-  };
+        io.to(roomName).emit(
+          'room_presence_update',
+          viewersList
+        );
+      } catch (err) {
+        console.error(
+          '❌ Presence tracking error:',
+          err
+        );
+      }
+    };
 
   if (
     room &&
@@ -837,12 +1018,15 @@ io.on('connection', (socket) => {
   socket.on(
     'register_user_session',
     ({ userId } = {}) => {
-      if (!userId) return;
+      if (!userId) {
+        return;
+      }
 
-      socket.userId = userId;
+      socket.userId =
+        String(userId);
 
       activeUsers.set(
-        userId,
+        String(userId),
         socket.id
       );
 
@@ -855,29 +1039,34 @@ io.on('connection', (socket) => {
       );
 
       console.log(
-        `🟢 User ${userId} bound to notification session map: ${socket.id}`
+        `🟢 User ${userId} registered on socket ${socket.id}`
       );
     }
   );
 
   /* =======================================================
-     1-ON-1 DIRECT CALLS
+     DIRECT CALL SIGNAL
   ======================================================= */
 
   socket.on(
     'initiate_call_signal',
     (callPayload = {}) => {
       const targetSocketId =
-        activeUsers.get(
+        resolveSocket(
           callPayload.receiverId
         );
 
-      if (targetSocketId) {
+      if (
+        targetSocketId &&
+        targetSocketId !== socket.id
+      ) {
         console.log(
-          `📞 Routing direct incoming ${callPayload.callType} call signal to target client: ${targetSocketId}`
+          `📞 Routing ${callPayload.callType || 'call'} to ${targetSocketId}`
         );
 
-        io.to(targetSocketId).emit(
+        io.to(
+          targetSocketId
+        ).emit(
           'incoming_call_signal',
           callPayload
         );
@@ -888,22 +1077,22 @@ io.on('connection', (socket) => {
   socket.on(
     'decline_call',
     ({ callerId } = {}) => {
-      const originCallerSocketId =
-        activeUsers.get(callerId);
+      const targetSocketId =
+        resolveSocket(callerId);
 
-      if (originCallerSocketId) {
-        console.log(
-          `🚫 Call declined by receiver. Notifying origin socket: ${originCallerSocketId}`
-        );
-
+      if (targetSocketId) {
         io.to(
-          originCallerSocketId
+          targetSocketId
         ).emit(
           'call_cancelled_by_caller'
         );
       }
     }
   );
+
+  /* =======================================================
+     P2P CALL ROOMS
+  ======================================================= */
 
   socket.on(
     'join_call_room',
@@ -912,58 +1101,52 @@ io.on('connection', (socket) => {
       userId,
       targetPeerId
     } = {}) => {
-      if (!roomId) return;
+      if (!roomId) {
+        return;
+      }
 
       socket.join(roomId);
 
-      console.log(
-        `📞 Socket ${socket.id} joined dedicated P2P WebRTC call room: ${roomId}`
+      rememberCallRoom(
+        roomId,
+        socket.id
       );
 
       if (userId) {
-        socket.userId = userId;
+        socket.userId =
+          String(userId);
 
         activeUsers.set(
-          userId,
+          String(userId),
           socket.id
         );
       }
 
-      let peerUserId =
-        targetPeerId;
+      console.log(
+        `📞 Socket ${socket.id} joined P2P call room: ${roomId}`
+      );
 
-      if (!peerUserId) {
-        const userIds =
-          roomId.split('-');
-
-        peerUserId =
-          userIds.find(
-            (id) => id !== userId
-          );
-      }
-
-      if (peerUserId) {
-        const targetSocketId =
-          activeUsers.get(
-            peerUserId
-          );
-
-        if (targetSocketId) {
-          console.log(
-            `🔔 Forwarding real-time incoming call alert from ${userId} to target socket ${targetSocketId}`
-          );
-
-          io.to(
-            targetSocketId
-          ).emit(
-            'incoming_call_signal',
-            {
-              callerId: userId,
-              roomId
-            }
-          );
+      socket.to(roomId).emit(
+        'peer_ready',
+        {
+          userId,
+          socketId: socket.id
         }
-      }
+      );
+
+      /*
+       * IMPORTANT:
+       * Do NOT emit incoming_call_signal here.
+       *
+       * The initial incoming-call notification
+       * is sent only by initiate_call_signal.
+       *
+       * This prevents repeated incoming-call
+       * notifications when a component reconnects,
+       * remounts, or rejoins the call room.
+       */
+
+      void targetPeerId;
     }
   );
 
@@ -973,11 +1156,9 @@ io.on('connection', (socket) => {
       roomId,
       userId
     } = {}) => {
-      if (!roomId) return;
-
-      console.log(
-        `⚡ Receiver/Peer (${userId || socket.id}) is mounted and ready in room: ${roomId}`
-      );
+      if (!roomId) {
+        return;
+      }
 
       socket.to(roomId).emit(
         'peer_ready',
@@ -989,31 +1170,70 @@ io.on('connection', (socket) => {
     }
   );
 
-  socket.on(
-    'reject_incoming_call',
-    ({
-      roomId,
-      to
-    } = {}) => {
-      const targetSocketId =
-        activeUsers.get(to);
+  const endCall = ({
+    roomId,
+    to,
+    userId
+  } = {}) => {
+    const targetSocketId =
+      resolveSocket(
+        to || userId
+      );
 
-      if (targetSocketId) {
-        console.log(
-          `🚫 Call rejected by peer. Notifying origin socket: ${targetSocketId}`
+    if (
+      targetSocketId &&
+      targetSocketId !== socket.id
+    ) {
+      io.to(
+        targetSocketId
+      ).emit(
+        'peer_hung_up',
+        {
+          roomId
+        }
+      );
+    }
+
+    if (roomId) {
+      socket.to(roomId).emit(
+        'peer_hung_up',
+        {
+          roomId
+        }
+      );
+
+      socket.leave(roomId);
+
+      const members =
+        callRooms.get(roomId);
+
+      if (members) {
+        members.delete(
+          socket.id
         );
 
-        io.to(
-          targetSocketId
-        ).emit(
-          'peer_hung_up'
-        );
-      } else if (roomId) {
-        socket.to(roomId).emit(
-          'peer_hung_up'
-        );
+        if (!members.size) {
+          callRooms.delete(
+            roomId
+          );
+        }
       }
     }
+  };
+
+  socket.on(
+    'reject_incoming_call',
+    endCall
+  );
+
+  socket.on(
+    'end_call',
+    endCall
+  );
+
+  socket.on(
+    'hang_up_call',
+    endCall
   );
 
   /* =======================================================
@@ -1023,25 +1243,27 @@ io.on('connection', (socket) => {
   socket.on(
     'publish_guest_feed',
     ({
-      streamId,
+      streamId: sid,
       guestId,
       targetHostId,
       sdpOffer,
       mode
     } = {}) => {
-      if (!streamId || !guestId) {
+      if (!sid || !guestId) {
         return;
       }
 
       const targetHostSocketId =
-        activeUsers.get(targetHostId) ||
+        resolveSocket(
+          targetHostId
+        ) ||
         streamRooms.get(
-          streamId
+          sid
         )?.hostSocketId;
 
-      if (!streamRooms.has(streamId)) {
+      if (!streamRooms.has(sid)) {
         streamRooms.set(
-          streamId,
+          sid,
           {
             hostSocketId:
               targetHostSocketId,
@@ -1052,22 +1274,37 @@ io.on('connection', (socket) => {
       }
 
       const roomState =
-        streamRooms.get(streamId);
+        streamRooms.get(sid);
+
+      if (targetHostSocketId) {
+        roomState.hostSocketId =
+          targetHostSocketId;
+      }
 
       roomState.guestPanels.set(
-        guestId,
+        String(guestId),
         socket.id
       );
 
-      socket.data = {
-        ...socket.data,
-        isGuestPanel: true,
+      socket.data.isGuestPanel =
+        true;
+
+      socket.data.guestId =
+        String(guestId);
+
+      socket.data.streamId =
+        sid;
+
+      const payload = {
         guestId,
-        streamId
+        guestSocketId:
+          socket.id,
+        sdpOffer,
+        mode
       };
 
       console.log(
-        `🎥 [MULTI-PANEL INGEST] Guest ${guestId} sending ${mode} stream feed to Host ${targetHostId}`
+        `🎥 Guest ${guestId} publishing feed to stream ${sid}`
       );
 
       if (targetHostSocketId) {
@@ -1075,24 +1312,12 @@ io.on('connection', (socket) => {
           targetHostSocketId
         ).emit(
           'incoming_guest_panel_feed',
-          {
-            guestId,
-            guestSocketId:
-              socket.id,
-            sdpOffer,
-            mode
-          }
+          payload
         );
       } else {
-        socket.to(streamId).emit(
+        socket.to(sid).emit(
           'incoming_guest_panel_feed',
-          {
-            guestId,
-            guestSocketId:
-              socket.id,
-            sdpOffer,
-            mode
-          }
+          payload
         );
       }
     }
@@ -1109,16 +1334,13 @@ io.on('connection', (socket) => {
         return;
       }
 
-      console.log(
-        `✅ [MULTI-PANEL ACK] Host accepted panel stream from guest ${guestId}`
-      );
-
       io.to(
         guestSocketId
       ).emit(
         'broadcast_ack_received',
         {
-          sdpAnswer
+          sdpAnswer,
+          guestId
         }
       );
     }
@@ -1127,14 +1349,14 @@ io.on('connection', (socket) => {
   socket.on(
     'guest_ice_candidate',
     ({
-      streamId,
+      streamId: sid,
       candidate,
       to
     } = {}) => {
       const targetHostSocketId =
-        activeUsers.get(to) ||
+        resolveSocket(to) ||
         streamRooms.get(
-          streamId
+          sid
         )?.hostSocketId;
 
       if (targetHostSocketId) {
@@ -1148,8 +1370,8 @@ io.on('connection', (socket) => {
               socket.id
           }
         );
-      } else if (streamId) {
-        socket.to(streamId).emit(
+      } else if (sid) {
+        socket.to(sid).emit(
           'incoming_guest_ice',
           {
             candidate,
@@ -1167,55 +1389,57 @@ io.on('connection', (socket) => {
       targetGuestSocketId,
       candidate
     } = {}) => {
-      if (targetGuestSocketId) {
-        io.to(
-          targetGuestSocketId
-        ).emit(
-          'incoming_host_ice',
-          {
-            candidate
-          }
-        );
+      if (!targetGuestSocketId) {
+        return;
       }
+
+      io.to(
+        targetGuestSocketId
+      ).emit(
+        'incoming_host_ice',
+        {
+          candidate
+        }
+      );
     }
   );
 
   socket.on(
     'remove_guest_panel',
     ({
-      streamId,
+      streamId: sid,
       guestId
     } = {}) => {
       const roomState =
-        streamRooms.get(
-          streamId
-        );
+        streamRooms.get(sid);
 
       if (
-        roomState &&
-        roomState.guestPanels.has(
-          guestId
+        !roomState ||
+        !roomState.guestPanels.has(
+          String(guestId)
         )
       ) {
-        const guestSocketId =
-          roomState.guestPanels.get(
-            guestId
-          );
-
-        io.to(
-          guestSocketId
-        ).emit(
-          'removed_from_panel'
-        );
-
-        roomState.guestPanels.delete(
-          guestId
-        );
-
-        console.log(
-          `🚫 [MULTI-PANEL REMOVED] Guest ${guestId} removed from multi-panel layout`
-        );
+        return;
       }
+
+      const guestSocketId =
+        roomState.guestPanels.get(
+          String(guestId)
+        );
+
+      io.to(
+        guestSocketId
+      ).emit(
+        'removed_from_panel'
+      );
+
+      roomState.guestPanels.delete(
+        String(guestId)
+      );
+
+      console.log(
+        `🚫 Guest ${guestId} removed from panel`
+      );
     }
   );
 
@@ -1226,42 +1450,34 @@ io.on('connection', (socket) => {
   socket.on(
     'approve_cohost',
     ({
-      streamId,
+      streamId: sid,
       guestId,
       mode
     } = {}) => {
-      if (!streamId || !guestId) {
+      if (!sid || !guestId) {
         return;
       }
 
-      console.log(
-        `✅ [COHOST] Host approved guest ${guestId} for stream ${streamId} in ${mode} mode`
-      );
+      const payload = {
+        streamId: sid,
+        guestId,
+        mode
+      };
 
-      io.to(streamId).emit(
+      io.to(sid).emit(
         'cohost_approved',
-        {
-          streamId,
-          guestId,
-          mode
-        }
+        payload
       );
 
       const targetGuestSocketId =
-        activeUsers.get(
-          guestId
-        );
+        resolveSocket(guestId);
 
       if (targetGuestSocketId) {
         io.to(
           targetGuestSocketId
         ).emit(
           'cohost_approved',
-          {
-            streamId,
-            guestId,
-            mode
-          }
+          payload
         );
       }
     }
@@ -1270,39 +1486,32 @@ io.on('connection', (socket) => {
   socket.on(
     'kick_cohost',
     ({
-      streamId,
+      streamId: sid,
       guestId
     } = {}) => {
-      if (!streamId || !guestId) {
+      if (!sid || !guestId) {
         return;
       }
 
-      console.log(
-        `🚫 [COHOST] Host kicked guest ${guestId} from stream ${streamId}`
-      );
+      const payload = {
+        streamId: sid,
+        guestId
+      };
 
-      io.to(streamId).emit(
+      io.to(sid).emit(
         'cohost_kicked',
-        {
-          streamId,
-          guestId
-        }
+        payload
       );
 
       const targetGuestSocketId =
-        activeUsers.get(
-          guestId
-        );
+        resolveSocket(guestId);
 
       if (targetGuestSocketId) {
         io.to(
           targetGuestSocketId
         ).emit(
           'cohost_kicked',
-          {
-            streamId,
-            guestId
-          }
+          payload
         );
       }
     }
@@ -1312,15 +1521,11 @@ io.on('connection', (socket) => {
     'send_cohost_invite',
     (data = {}) => {
       const targetSocketId =
-        activeUsers.get(
+        resolveSocket(
           data.targetUserId
         );
 
       if (targetSocketId) {
-        console.log(
-          `✉️ Cross-Room Signal: Routing invitation from Room [${data.room}] directly to Target Socket ID [${targetSocketId}]`
-        );
-
         io.to(
           targetSocketId
         ).emit(
@@ -1341,15 +1546,11 @@ io.on('connection', (socket) => {
     'respond_cohost_invite',
     (data = {}) => {
       const originHostSocketId =
-        activeUsers.get(
+        resolveSocket(
           data.targetUserId
         );
 
       if (originHostSocketId) {
-        console.log(
-          `📥 Routing invite response status [${data.status}] back to origin room host socket: ${originHostSocketId}`
-        );
-
         io.to(
           originHostSocketId
         ).emit(
@@ -1381,14 +1582,14 @@ io.on('connection', (socket) => {
 
   socket.on(
     'request_host_stream',
-    ({ streamId } = {}) => {
-      if (!streamId) return;
+    ({
+      streamId: sid
+    } = {}) => {
+      if (!sid) {
+        return;
+      }
 
-      console.log(
-        `📡 Forwarding explicit stream request from viewer (${socket.id}) to room channel [${streamId}]`
-      );
-
-      socket.to(streamId).emit(
+      socket.to(sid).emit(
         'viewer_requesting_stream',
         {
           viewerSocketId:
@@ -1402,211 +1603,199 @@ io.on('connection', (socket) => {
      WEBRTC SIGNALING
   ======================================================= */
 
-  socket.on(
-    'send_webrtc_offer',
-    (data = {}) => {
-      const {
-        streamId,
-        roomId,
-        offer,
-        targetViewerId,
-        to,
-        guestId,
-        mode
-      } = data;
+  const routeWebRTCOffer = (
+    data = {}
+  ) => {
+    const {
+      streamId: sid,
+      roomId,
+      offer,
+      targetViewerId,
+      to,
+      guestId,
+      mode
+    } = data;
 
-      const activeRoom =
-        roomId || streamId;
+    const activeRoom =
+      roomId || sid;
 
-      const targetId =
-        targetViewerId || to;
+    const targetId =
+      targetViewerId || to;
 
-      const targetSocketId =
-        targetId
-          ? activeUsers.get(
-              targetId
-            )
-          : null;
+    const targetSocketId =
+      resolveSocket(targetId);
 
-      console.log(
-        `📤 WebRTC Offer from ${socket.id} -> Target: ${targetId || activeRoom}`
+    const payload = {
+      offer,
+      guestId:
+        guestId ||
+        socket.userId ||
+        socket.id,
+      mode:
+        mode || 'video',
+      hostSocketId:
+        socket.id,
+      senderSocketId:
+        socket.id
+    };
+
+    console.log(
+      `📤 WebRTC offer from ${socket.id} -> ${targetId || activeRoom || 'none'}`
+    );
+
+    if (
+      targetSocketId &&
+      targetSocketId !== socket.id
+    ) {
+      io.to(
+        targetSocketId
+      ).emit(
+        'webrtc_offer_received',
+        payload
+      );
+    } else if (activeRoom) {
+      socket.to(
+        activeRoom
+      ).emit(
+        'webrtc_offer_received',
+        payload
+      );
+    }
+  };
+
+  const routeWebRTCAnswer = (
+    data = {}
+  ) => {
+    const {
+      streamId: sid,
+      roomId,
+      answer,
+      to,
+      targetSocketId: targetId
+    } = data;
+
+    const activeRoom =
+      roomId || sid;
+
+    const destination =
+      resolveSocket(
+        to || targetId
       );
 
-      const offerPayload = {
-        offer,
-        guestId:
-          guestId ||
-          socket.userId ||
-          socket.id,
-        mode:
-          mode || 'video',
-        hostSocketId:
-          socket.id,
-        senderSocketId:
-          socket.id
-      };
+    const payload = {
+      answer,
+      viewerSocketId:
+        socket.id,
+      senderSocketId:
+        socket.id
+    };
 
-      if (targetSocketId) {
-        io.to(
-          targetSocketId
-        ).emit(
-          'send_webrtc_offer',
-          offerPayload
-        );
+    console.log(
+      `📥 WebRTC answer from ${socket.id} -> ${to || targetId || activeRoom || 'none'}`
+    );
 
-        io.to(
-          targetSocketId
-        ).emit(
-          'webrtc_offer_received',
-          offerPayload
-        );
-      } else if (activeRoom) {
-        socket.to(activeRoom).emit(
-          'send_webrtc_offer',
-          offerPayload
-        );
-
-        socket.to(activeRoom).emit(
-          'webrtc_offer_received',
-          offerPayload
-        );
-      }
+    if (
+      destination &&
+      destination !== socket.id
+    ) {
+      io.to(
+        destination
+      ).emit(
+        'webrtc_answer_received',
+        payload
+      );
+    } else if (activeRoom) {
+      socket.to(
+        activeRoom
+      ).emit(
+        'webrtc_answer_received',
+        payload
+      );
     }
+  };
+
+  const routeWebRTCIce = (
+    data = {}
+  ) => {
+    const {
+      streamId: sid,
+      roomId,
+      candidate,
+      targetSocketId,
+      to,
+      senderType
+    } = data;
+
+    const activeRoom =
+      roomId || sid;
+
+    const destination =
+      resolveSocket(
+        to || targetSocketId
+      );
+
+    const payload = {
+      candidate,
+      senderType,
+      senderSocketId:
+        socket.id
+    };
+
+    if (
+      destination &&
+      destination !== socket.id
+    ) {
+      io.to(
+        destination
+      ).emit(
+        'incoming_ice_candidate',
+        payload
+      );
+    } else if (activeRoom) {
+      socket.to(
+        activeRoom
+      ).emit(
+        'incoming_ice_candidate',
+        payload
+      );
+    }
+  };
+
+  socket.on(
+    'send_webrtc_offer',
+    routeWebRTCOffer
   );
 
   socket.on(
     'send_webrtc_answer',
-    (data = {}) => {
-      const {
-        streamId,
-        roomId,
-        answer,
-        to
-      } = data;
-
-      const activeRoom =
-        roomId || streamId;
-
-      const targetSocketId =
-        to
-          ? activeUsers.get(to)
-          : null;
-
-      console.log(
-        `📥 Answer from ${socket.id} -> Target ID: ${to || 'room'} | Room: ${activeRoom || 'none'}`
-      );
-
-      if (targetSocketId) {
-        io.to(
-          targetSocketId
-        ).emit(
-          'webrtc_answer_received',
-          {
-            answer,
-            viewerSocketId:
-              socket.id,
-            senderSocketId:
-              socket.id
-          }
-        );
-      } else if (activeRoom) {
-        socket.to(activeRoom).emit(
-          'webrtc_answer_received',
-          {
-            answer,
-            viewerSocketId:
-              socket.id,
-            senderSocketId:
-              socket.id
-          }
-        );
-      }
-    }
+    routeWebRTCAnswer
   );
 
   socket.on(
     'webrtc_ice_candidate',
-    (data = {}) => {
-      const {
-        streamId,
-        roomId,
-        candidate,
-        targetSocketId,
-        to,
-        senderType
-      } = data;
-
-      const activeRoom =
-        roomId || streamId;
-
-      const destinationUser =
-        to || targetSocketId;
-
-      const targetSocket =
-        destinationUser
-          ? activeUsers.get(
-              destinationUser
-            )
-          : null;
-
-      if (targetSocket) {
-        io.to(
-          targetSocket
-        ).emit(
-          'incoming_ice_candidate',
-          {
-            candidate,
-            senderType,
-            senderSocketId:
-              socket.id
-          }
-        );
-      } else if (activeRoom) {
-        socket.to(activeRoom).emit(
-          'incoming_ice_candidate',
-          {
-            candidate,
-            senderType,
-            senderSocketId:
-              socket.id
-          }
-        );
-      }
-    }
+    routeWebRTCIce
   );
 
-  /* =======================================================
-     LEGACY WEBRTC ALIASES
-  ======================================================= */
+  /* Legacy aliases */
 
   socket.on(
     'webrtc_offer',
-    (data = {}) => {
-      socket.emit(
-        'send_webrtc_offer',
-        data
-      );
-    }
+    routeWebRTCOffer
   );
 
   socket.on(
     'webrtc_answer',
-    (data = {}) => {
-      socket.emit(
-        'send_webrtc_answer',
-        data
-      );
-    }
+    routeWebRTCAnswer
   );
 
   socket.on(
     'send_ice_candidate',
-    (data = {}) => {
-      socket.emit(
-        'webrtc_ice_candidate',
-        data
-      );
-    }
+    routeWebRTCIce
+  );
+
+  socket.on(
+    'ice_candidate',
+    routeWebRTCIce
   );
 
   /* =======================================================
@@ -1616,12 +1805,15 @@ io.on('connection', (socket) => {
   socket.on(
     'user_going_online',
     (userId) => {
-      if (!userId) return;
+      if (!userId) {
+        return;
+      }
 
-      socket.userId = userId;
+      socket.userId =
+        String(userId);
 
       activeUsers.set(
-        userId,
+        String(userId),
         socket.id
       );
 
@@ -1639,7 +1831,7 @@ io.on('connection', (socket) => {
     'send_chat_message',
     (messagePayload = {}) => {
       const targetSocketId =
-        activeUsers.get(
+        resolveSocket(
           messagePayload.receiver_id
         );
 
@@ -1658,7 +1850,7 @@ io.on('connection', (socket) => {
     'broadcast_message_update',
     (updatedPayload = {}) => {
       const targetSocketId =
-        activeUsers.get(
+        resolveSocket(
           updatedPayload.receiver_id
         );
 
@@ -1702,15 +1894,14 @@ io.on('connection', (socket) => {
         `❌ Disconnected: Socket ${socket.id}`
       );
 
-      if (room) {
-        socket.leave(room);
-
-        if (
+      if (
+        room &&
+        (
           role === 'viewer' ||
           role === 'signal-viewer'
-        ) {
-          broadcastRoomPresence(room);
-        }
+        )
+      ) {
+        broadcastRoomPresence(room);
       }
 
       if (
@@ -1727,7 +1918,9 @@ io.on('connection', (socket) => {
             socket.data.guestId
           );
 
-          if (roomState.hostSocketId) {
+          if (
+            roomState.hostSocketId
+          ) {
             io.to(
               roomState.hostSocketId
             ).emit(
@@ -1742,22 +1935,24 @@ io.on('connection', (socket) => {
       }
 
       if (socket.hostIdentifier) {
-        const registeredSocket =
-          activeUsers.get(
+        const hostKey =
+          String(
             socket.hostIdentifier
           );
 
         if (
-          registeredSocket === socket.id
+          activeUsers.get(
+            hostKey
+          ) === socket.id
         ) {
           activeUsers.delete(
-            socket.hostIdentifier
+            hostKey
           );
         }
 
         const roomState =
           streamRooms.get(
-            socket.hostIdentifier
+            hostKey
           );
 
         if (
@@ -1766,23 +1961,26 @@ io.on('connection', (socket) => {
             socket.id
         ) {
           streamRooms.delete(
-            socket.hostIdentifier
+            hostKey
           );
         }
       }
 
+      forgetSocketFromCallRooms(
+        socket.id
+      );
+
       if (socket.userId) {
-        const registeredSocket =
-          activeUsers.get(
-            socket.userId
-          );
+        const userKey =
+          String(socket.userId);
 
         if (
-          registeredSocket ===
-          socket.id
+          activeUsers.get(
+            userKey
+          ) === socket.id
         ) {
           activeUsers.delete(
-            socket.userId
+            userKey
           );
 
           io.emit(
@@ -1806,20 +2004,27 @@ io.on('connection', (socket) => {
 const PORT =
   process.env.PORT || 4000;
 
-http.listen(PORT, () => {
-  console.log(
-    `🚀 Socket signaling machine operational on port ${PORT}`
-  );
+http.listen(
+  PORT,
+  () => {
+    console.log(
+      `🚀 Socket signaling machine operational on port ${PORT}`
+    );
 
-  console.log(
-    `☁️ B2 storage: ${
-      b2Configured
-        ? 'READY'
-        : 'NOT CONFIGURED'
-    }`
-  );
+    console.log(
+      `☁️ B2 storage: ${
+        b2Configured
+          ? 'READY'
+          : 'NOT CONFIGURED'
+      }`
+    );
 
-  console.log(
-    `🌐 Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`
-  );
-});
+    console.log(
+      `🌐 Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`
+    );
+
+    console.log(
+      '🎬 Video merge routes: /api/merge-video + /api/storage/merge-video'
+    );
+  }
+);
