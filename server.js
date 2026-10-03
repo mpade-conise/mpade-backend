@@ -2779,7 +2779,9 @@ io.on(
         viewerSocketId:
           socket.id,
         senderSocketId:
-          socket.id
+          socket.id,
+        targetHostSocketId:
+          destination || null
       };
 
       console.log(
@@ -2797,14 +2799,9 @@ io.on(
           'webrtc_answer_received',
           payload
         );
-      } else if (
-        activeRoom
-      ) {
-        socket.to(
-          activeRoom
-        ).emit(
-          'webrtc_answer_received',
-          payload
+      } else {
+        console.warn(
+          `⚠️ Dropping WebRTC answer from ${socket.id} because its host target could not be resolved.`
         );
       }
     };
