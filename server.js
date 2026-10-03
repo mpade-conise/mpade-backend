@@ -2972,16 +2972,29 @@ io.on(
       'user_typing_state',
       ({
         userId,
+        receiverId,
         isTyping,
         mode
       } = {}) => {
+        const payload = {
+          userId,
+          isTyping,
+          mode
+        };
+
+        const targetSocketId = resolveSocket(receiverId);
+
+        if (targetSocketId && targetSocketId !== socket.id) {
+          io.to(targetSocketId).emit(
+            'peer_typing_state_changed',
+            payload
+          );
+          return;
+        }
+
         socket.broadcast.emit(
           'peer_typing_state_changed',
-          {
-            userId,
-            isTyping,
-            mode
-          }
+          payload
         );
       }
     );
