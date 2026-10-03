@@ -1087,23 +1087,20 @@ app.post(
         fileSize !== undefined &&
         fileSize !== null
       ) {
-        const numericSize =
-          Number(fileSize);
+        const numericSize = Number(fileSize);
+        const maxSize = getFolderMaxUploadSize(normalizedFolder);
 
         if (
-          !Number.isFinite(
-            numericSize
-          ) ||
+          !Number.isFinite(numericSize) ||
           numericSize <= 0 ||
-          numericSize >
-            MAX_UPLOAD_SIZE
+          numericSize > maxSize
         ) {
           return res.status(400).json({
-            error: 'Invalid file size.',
-            maxBytes:
-              getFolderMaxUploadSize(
-                normalizedFolder
-              )
+            error:
+              normalizedFolder === 'videos'
+                ? 'Video exceeds the 50 MB maximum.'
+                : 'File exceeds the maximum allowed size.',
+            maxBytes: maxSize
           });
         }
       }
