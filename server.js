@@ -2659,6 +2659,23 @@ io.on(
           return;
         }
 
+        const roomState =
+          streamRooms.get(String(sid));
+
+        const hostSocketId =
+          roomState?.hostSocketId;
+
+        if (hostSocketId) {
+          io.to(hostSocketId).emit(
+            'viewer_requesting_stream',
+            {
+              viewerSocketId:
+                socket.id
+            }
+          );
+          return;
+        }
+
         socket.to(sid).emit(
           'viewer_requesting_stream',
           {
