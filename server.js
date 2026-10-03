@@ -76,6 +76,9 @@ const io = require('socket.io')(http, {
   }
 });
 
+const { attachLiveSFU } = require('./live-sfu');
+attachLiveSFU(io);
+
 /* =========================================================
    BACKBLAZE B2 / S3 CONFIGURATION
 ========================================================= */
