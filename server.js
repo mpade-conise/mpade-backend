@@ -2917,10 +2917,9 @@ io.on(
         socket.userId =
           String(userId);
 
-        activeUsers.set(
-          String(userId),
-          socket.id
-        );
+        const userKey = String(userId);
+        if (!userSockets.has(userKey)) userSockets.set(userKey, new Set());
+        userSockets.get(userKey).add(socket.id);
 
         io.emit(
           'friend_presence_changed',
