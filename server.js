@@ -1818,6 +1818,9 @@ app.post(
 const activeUsers =
   new Map();
 
+const userSockets =
+  new Map();
+
 const streamRooms =
   new Map();
 
@@ -1847,6 +1850,12 @@ const resolveSocket = (
     return directSocket.id;
   }
 
+  const userSocketIds = userSockets.get(stringValue);
+  if (userSocketIds?.size) {
+    for (const socketId of userSocketIds) {
+      if (io.sockets.sockets.has(socketId)) return socketId;
+    }
+  }
   return (
     activeUsers.get(
       stringValue
@@ -2055,10 +2064,9 @@ io.on(
         socket.userId =
           String(userId);
 
-        activeUsers.set(
-          String(userId),
-          socket.id
-        );
+        const userKey = String(userId);
+        if (!userSockets.has(userKey)) userSockets.set(userKey, new Set());
+        userSockets.get(userKey).add(socket.id);
 
         io.emit(
           'friend_presence_changed',
@@ -3000,6 +3008,20 @@ io.on(
     );
 
     /* =======================================================
+       IN-CALL DATA
+    ======================================================= */
+
+    socket.on('in_call_text_message', (data = {}) => {
+      if (!data.roomId) return;
+      socket.to(data.roomId).emit('in_call_text_message', data);
+    });
+
+    socket.on('in_call_reaction_burst', (data = {}) => {
+      if (!data.roomId || !data.emoji) return;
+      socket.to(data.roomId).emit('in_call_reaction_burst', data);
+    });
+
+    /* =======================================================
        DISCONNECT CLEANUP
     ======================================================= */
 
@@ -3090,32 +3112,15 @@ io.on(
           socket.id
         );
 
-        if (
-          socket.userId
-        ) {
-          const userKey =
-            String(
-              socket.userId
-            );
-
-          if (
-            activeUsers.get(
-              userKey
-            ) === socket.id
-          ) {
-            activeUsers.delete(
-              userKey
-            );
-
-            io.emit(
-              'friend_presence_changed',
-              {
-                userId:
-                  socket.userId,
-                status:
-                  'offline'
-              }
-            );
+        if (socket.userId) {
+          const userKey = String(socket.userId);
+          const socketsForUser = userSockets.get(userKey);
+          if (socketsForUser) {
+            socketsForUser.delete(socket.id);
+            if (!socketsForUser.size) {
+              userSockets.delete(userKey);
+              io.emit('friend_presence_changed', { userId: socket.userId, status: 'offline' });
+            }
           }
         }
       }
