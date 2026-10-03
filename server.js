@@ -36,6 +36,7 @@ const ALLOWED_STORAGE_FOLDERS = new Set([
 ]);
 
 const MAX_UPLOAD_SIZE = 1024 * 1024 * 1024;
+const MAX_VIDEO_UPLOAD_SIZE = 50 * 1024 * 1024;
 
 const corsOptions = {
   origin: ALLOWED_ORIGINS,
@@ -410,6 +411,21 @@ const parseStorageObjectKey = (objectKey) => {
   };
 };
 
+const getPublicObjectUrl = (objectKey) => {
+  const base = String(
+    process.env.B2_PUBLIC_URL_BASE ||
+    process.env.MEDIA_PUBLIC_URL_BASE ||
+    ''
+  ).replace(/\/+$/, '');
+
+  if (!base) return null;
+
+  return `${base}/${String(objectKey).split('/').map(encodeURIComponent).join('/')}`;
+};
+
+const getFolderMaxUploadSize = folder =>
+  folder === 'videos' ? MAX_VIDEO_UPLOAD_SIZE : MAX_UPLOAD_SIZE;
+
 const isHttpUrl = (value) => {
   if (!value || typeof value !== 'string') {
     return false;
@@ -684,9 +700,15 @@ const verifyB2Object = async (objectKey) => {
     );
   }
 
-  if (size > MAX_UPLOAD_SIZE) {
+  const maxSize = parsed.folder === 'videos'
+    ? MAX_VIDEO_UPLOAD_SIZE
+    : MAX_UPLOAD_SIZE;
+
+  if (size > maxSize) {
     throw new Error(
-      'Uploaded object exceeds the maximum allowed size.'
+      parsed.folder === 'videos'
+        ? 'Uploaded video exceeds the 50 MB maximum.'
+        : 'Uploaded object exceeds the maximum allowed size.'
     );
   }
 
@@ -1079,7 +1101,9 @@ app.post(
           return res.status(400).json({
             error: 'Invalid file size.',
             maxBytes:
-              MAX_UPLOAD_SIZE
+              getFolderMaxUploadSize(
+                normalizedFolder
+              )
           });
         }
       }
@@ -1126,7 +1150,9 @@ app.post(
             contentType
         },
         folder:
-          normalizedFolder
+          normalizedFolder,
+        objectUrl:
+          getPublicObjectUrl(objectKey)
       });
     } catch (error) {
       console.error(
@@ -1575,7 +1601,9 @@ const mergeVideoHandler = async (
         contentType:
           verifiedObject.contentType,
         size:
-          verifiedObject.size
+          verifiedObject.size,
+        objectUrl:
+          getPublicObjectUrl(verifiedObject.objectKey)
       });
     }
 
@@ -1807,7 +1835,9 @@ const mergeVideoHandler = async (
       contentType:
         'video/mp4',
       size:
-        outputStats.size
+        outputStats.size,
+      objectUrl:
+        getPublicObjectUrl(finalObjectKey)
     });
   } catch (error) {
     console.error(
