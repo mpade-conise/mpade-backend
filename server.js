@@ -249,20 +249,6 @@ app.post('/api/account/deactivate', authenticateSupabaseUser, requireSupabaseAdm
     const userId = req.authUser.id;
     await setAccountLifecycle(userId, 'deactivated');
 
-    if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
-      const supabaseUrl = process.env.SUPABASE_URL.replace(/\/+$/, '');
-      await fetch(`${supabaseUrl}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`, {
-        method: 'PATCH',
-        headers: {
-          Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
-          apikey: process.env.SUPABASE_SERVICE_ROLE_KEY,
-          'Content-Type': 'application/json',
-          Prefer: 'return=minimal'
-        },
-        body: JSON.stringify({ account_status: 'deactivated' })
-      });
-    }
-
     return res.json({ success: true, status: 'deactivated' });
   } catch (error) {
     console.error('❌ Account deactivation error:', error.message);
@@ -307,20 +293,6 @@ app.delete('/api/account', authenticateSupabaseUser, requireSupabaseAdmin, async
     const userId = req.authUser.id;
     const supabaseUrl = process.env.SUPABASE_URL.replace(/\/+$/, '');
     const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-    const profileResponse = await fetch(`${supabaseUrl}/rest/v1/profiles?id=eq.${encodeURIComponent(userId)}`, {
-      method: 'DELETE',
-      headers: {
-        Authorization: `Bearer ${serviceKey}`,
-        apikey: serviceKey,
-        Prefer: 'return=minimal'
-      }
-    });
-
-    if (!profileResponse.ok && profileResponse.status !== 404) {
-      const detail = await profileResponse.text();
-      throw new Error(`Profile cleanup failed: ${detail || profileResponse.status}`);
-    }
 
     await supabaseAdminRequest('DELETE', `/admin/users/${encodeURIComponent(userId)}`);
 
