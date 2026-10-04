@@ -304,17 +304,51 @@ io.on(
 
     socket.on(
       'decline_call',
-      ({ callerId } = {}) => {
+      (data = {}) => {
+        const callerId =
+          data.callerId ||
+          data.to ||
+          data.userId;
+
         const targetSocketId =
           resolveSocket(
             callerId
           );
 
+        const payload = {
+          roomId:
+            data.roomId || null,
+          callId:
+            data.callId || null,
+          reason:
+            'declined'
+        };
+
         if (targetSocketId) {
           io.to(
             targetSocketId
           ).emit(
-            'call_cancelled_by_caller'
+            'call_cancelled_by_caller',
+            payload
+          );
+        }
+
+        if (data.roomId) {
+          socket.to(
+            data.roomId
+          ).emit(
+            'peer_hung_up',
+            payload
+          );
+        } else if (
+          targetSocketId &&
+          targetSocketId !== socket.id
+        ) {
+          io.to(
+            targetSocketId
+          ).emit(
+            'peer_hung_up',
+            payload
           );
         }
       }
