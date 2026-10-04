@@ -284,16 +284,21 @@ const parseStorageObjectKey = (objectKey) => {
   };
 };
 
-const getPublicObjectUrl = (objectKey) => {
-  const base = String(
-    process.env.B2_PUBLIC_URL_BASE ||
-    process.env.MEDIA_PUBLIC_URL_BASE ||
-    ''
-  ).replace(/\/+$/, '');
+const getPrivateObjectUrl = async (objectKey, expiresIn = 604800) => {
+  const parsed = parseStorageObjectKey(objectKey);
 
-  if (!base) return null;
+  if (!parsed || !b2) {
+    return null;
+  }
 
-  return `${base}/${String(objectKey).split('/').map(encodeURIComponent).join('/')}`;
+  const command = new GetObjectCommand({
+    Bucket: process.env.B2_BUCKET,
+    Key: parsed.normalizedKey
+  });
+
+  return getSignedUrl(b2, command, {
+    expiresIn
+  });
 };
 
 const getFolderMaxUploadSize = folder =>
@@ -884,7 +889,7 @@ const processVideoWithFFmpeg = ({
 
 const { registerMediaRoutes } = require('./modules/media-routes');
 
-registerMediaRoutes({ app, http, io, crypto, path, fs, os, ffmpeg, ALLOWED_ORIGINS, ALLOWED_STORAGE_FOLDERS, b2Configured, b2, authenticateSupabaseUser, sanitizeFileName, getExtension, isValidContentType, createStorageObjectKey, parseStorageObjectKey, getPublicObjectUrl, getFolderMaxUploadSize, isHttpUrl, cleanupTempFiles, downloadB2ObjectToFile, downloadRemoteAudioToFile, normalizeVideoFilter, needsVideoProcessing, verifyB2Object, processVideoWithFFmpeg });
+registerMediaRoutes({ app, http, io, crypto, path, fs, os, ffmpeg, ALLOWED_ORIGINS, ALLOWED_STORAGE_FOLDERS, b2Configured, b2, authenticateSupabaseUser, sanitizeFileName, getExtension, isValidContentType, createStorageObjectKey, parseStorageObjectKey, getPrivateObjectUrl, getFolderMaxUploadSize, isHttpUrl, cleanupTempFiles, downloadB2ObjectToFile, downloadRemoteAudioToFile, normalizeVideoFilter, needsVideoProcessing, verifyB2Object, processVideoWithFFmpeg });
 
 const { registerSocketServer } = require('./modules/socket-server');
 
