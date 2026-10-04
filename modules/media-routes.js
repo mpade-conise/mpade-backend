@@ -1,4 +1,4 @@
-const registerMediaRoutes = ({ app, http, io, crypto, path, fs, os, ffmpeg, ALLOWED_ORIGINS, ALLOWED_STORAGE_FOLDERS, b2Configured, b2, authenticateSupabaseUser, sanitizeFileName, getExtension, isValidContentType, createStorageObjectKey, parseStorageObjectKey, getPublicObjectUrl, getFolderMaxUploadSize, isHttpUrl, cleanupTempFiles, downloadB2ObjectToFile, downloadRemoteAudioToFile, normalizeVideoFilter, needsVideoProcessing, verifyB2Object, processVideoWithFFmpeg }) => {
+const registerMediaRoutes = ({ app, http, io, crypto, path, fs, os, ffmpeg, ALLOWED_ORIGINS, ALLOWED_STORAGE_FOLDERS, b2Configured, b2, authenticateSupabaseUser, sanitizeFileName, getExtension, isValidContentType, createStorageObjectKey, parseStorageObjectKey, getPrivateObjectUrl, getFolderMaxUploadSize, isHttpUrl, cleanupTempFiles, downloadB2ObjectToFile, downloadRemoteAudioToFile, normalizeVideoFilter, needsVideoProcessing, verifyB2Object, processVideoWithFFmpeg }) => {
 const requireB2 = (req, res, next) => {
   if (!b2Configured || !b2) {
     return res.status(503).json({
@@ -150,7 +150,7 @@ app.post(
         folder:
           normalizedFolder,
         objectUrl:
-          getPublicObjectUrl(objectKey)
+          await getPrivateObjectUrl(objectKey)
       });
     } catch (error) {
       console.error(
@@ -601,7 +601,7 @@ const mergeVideoHandler = async (
         size:
           verifiedObject.size,
         objectUrl:
-          getPublicObjectUrl(verifiedObject.objectKey)
+          await getPrivateObjectUrl(verifiedObject.objectKey)
       });
     }
 
@@ -835,7 +835,7 @@ const mergeVideoHandler = async (
       size:
         outputStats.size,
       objectUrl:
-        getPublicObjectUrl(finalObjectKey)
+        getPrivateObjectUrl(finalObjectKey)
     });
   } catch (error) {
     console.error(
