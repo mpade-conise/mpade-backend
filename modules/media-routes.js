@@ -1,4 +1,5 @@
 const registerMediaRoutes = ({ app, http, io, crypto, path, fs, os, ffmpeg, ALLOWED_ORIGINS, ALLOWED_STORAGE_FOLDERS, b2Configured, b2, authenticateSupabaseUser, sanitizeFileName, getExtension, isValidContentType, createStorageObjectKey, parseStorageObjectKey, getPublicObjectUrl, getFolderMaxUploadSize, isHttpUrl, cleanupTempFiles, downloadB2ObjectToFile, downloadRemoteAudioToFile, normalizeVideoFilter, needsVideoProcessing, verifyB2Object, processVideoWithFFmpeg }) => {
+/* =========================================================
    HEALTH
 ========================================================= */
 
