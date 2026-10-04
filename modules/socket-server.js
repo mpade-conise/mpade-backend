@@ -398,10 +398,10 @@ io.on(
       const targetSocketId = resolveSocket(to || userId);
       const payload = { roomId, callId: callId || null };
 
-      if (targetSocketId && targetSocketId !== socket.id) {
-        io.to(targetSocketId).emit('peer_hung_up', payload);
-      } else if (roomId) {
+      if (roomId) {
         socket.to(roomId).emit('peer_hung_up', payload);
+      } else if (targetSocketId && targetSocketId !== socket.id) {
+        io.to(targetSocketId).emit('peer_hung_up', payload);
       }
 
       if (roomId) {
@@ -890,13 +890,9 @@ io.on(
       const targetId =
         targetViewerId || to;
 
-      const targetSocketId =
-        resolveSocket(
-          targetId
-        );
-
       const payload = {
         offer,
+        callId: data.callId || null,
         guestId:
           guestId ||
           socket.userId ||
@@ -913,26 +909,31 @@ io.on(
         `📤 WebRTC offer from ${socket.id} -> ${targetId || activeRoom || 'none'}`
       );
 
-      if (
-        targetSocketId &&
-        targetSocketId !==
-          socket.id
-      ) {
-        io.to(
-          targetSocketId
-        ).emit(
-          'webrtc_offer_received',
-          payload
-        );
-      } else if (
-        activeRoom
-      ) {
+      if (activeRoom) {
         socket.to(
           activeRoom
         ).emit(
           'webrtc_offer_received',
           payload
         );
+      } else {
+        const targetSocketId =
+          resolveSocket(
+            targetId
+          );
+
+        if (
+          targetSocketId &&
+          targetSocketId !==
+            socket.id
+        ) {
+          io.to(
+            targetSocketId
+          ).emit(
+            'webrtc_offer_received',
+            payload
+          );
+        }
       }
     };
 
@@ -957,6 +958,7 @@ io.on(
 
       const payload = {
         answer,
+        callId: data.callId || null,
         viewerSocketId:
           socket.id,
         senderSocketId:
@@ -969,7 +971,14 @@ io.on(
         `📥 WebRTC answer from ${socket.id} -> ${to || targetId || activeRoom || 'none'}`
       );
 
-      if (
+      if (activeRoom) {
+        socket.to(
+          activeRoom
+        ).emit(
+          'webrtc_answer_received',
+          payload
+        );
+      } else if (
         destination &&
         destination !==
           socket.id
@@ -979,10 +988,6 @@ io.on(
         ).emit(
           'webrtc_answer_received',
           payload
-        );
-      } else {
-        console.warn(
-          `⚠️ Dropping WebRTC answer from ${socket.id} because its host target could not be resolved.`
         );
       }
     };
@@ -1014,22 +1019,20 @@ io.on(
           socket.id
       };
 
-      if (
+      if (activeRoom) {
+        socket.to(
+          activeRoom
+        ).emit(
+          'incoming_ice_candidate',
+          payload
+        );
+      } else if (
         destination &&
         destination !==
           socket.id
       ) {
         io.to(
           destination
-        ).emit(
-          'incoming_ice_candidate',
-          payload
-        );
-      } else if (
-        activeRoom
-      ) {
-        socket.to(
-          activeRoom
         ).emit(
           'incoming_ice_candidate',
           payload
