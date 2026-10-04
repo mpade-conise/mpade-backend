@@ -2743,21 +2743,34 @@ io.on(
             data.targetUserId
           );
 
-        if (
-          originHostSocketId
-        ) {
-          io.to(
-            originHostSocketId
-          ).emit(
-            'cohost_invite_accepted',
-            {
-              room:
-                data.room,
-              status:
-                data.status
-            }
+        if (!originHostSocketId) {
+          console.warn(
+            '⚠️ Co-host response target socket not found:',
+            data.targetUserId
           );
+          return;
         }
+
+        const eventName =
+          data.status === 'accepted'
+            ? 'cohost_invite_accepted'
+            : 'cohost_invite_declined';
+
+        io.to(
+          originHostSocketId
+        ).emit(
+          eventName,
+          {
+            room:
+              data.room,
+            status:
+              data.status,
+            responderSocketId:
+              socket.id,
+            responderUserId:
+              socket.userId || null
+          }
+        );
       }
     );
 
