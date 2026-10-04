@@ -130,7 +130,6 @@ const requireB2 = (req, res, next) => {
   return next();
 };
 
-/* =========================================================
 };
 
 module.exports = { registerAccountRoutes };
