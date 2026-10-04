@@ -190,7 +190,7 @@ const authenticateSupabaseUser = async (req, res, next) => {
 /* =========================================================
 const { registerAccountRoutes } = require('./modules/account-routes');
 
-registerAccountRoutes({ app, authenticateSupabaseUser, requireSupabaseAdmin });
+registerAccountRoutes({ app, authenticateSupabaseUser });
 
    B2 HELPERS
 ========================================================= */
