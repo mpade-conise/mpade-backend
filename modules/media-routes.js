@@ -948,7 +948,6 @@ app.post(
   mergeVideoHandler
 );
 
-/* =========================================================
 };
 
 module.exports = { registerMediaRoutes };
