@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node server.js",
+    "render-build": "npm install --ignore-scripts --no-audit --no-fund --install-strategy=shallow && node scripts/prepare-mediasoup-worker.js"
   },
   "keywords": [],
   "author": "",
