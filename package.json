@@ -6,7 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js",
-    "render-build": "npm install --ignore-scripts --no-audit --no-fund --install-strategy=shallow && node scripts/prepare-mediasoup-worker.js"
+    "render-build": "MEDIASOUP_FORCE_WORKER_PREBUILT_DOWNLOAD=true npm install --ignore-scripts --no-audit --no-fund --install-strategy=shallow && MEDIASOUP_FORCE_WORKER_PREBUILT_DOWNLOAD=true node node_modules/mediasoup/npm-scripts.mjs postinstall"
   },
   "keywords": [],
   "author": "",
