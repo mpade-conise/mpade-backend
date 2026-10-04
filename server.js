@@ -890,6 +890,7 @@ const { registerSocketServer } = require('./modules/socket-server');
 
 registerSocketServer(io);
 
+/* =========================================================
    SERVER START
 ========================================================= */
 
