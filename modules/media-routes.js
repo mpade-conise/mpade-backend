@@ -835,7 +835,7 @@ const mergeVideoHandler = async (
       size:
         outputStats.size,
       objectUrl:
-        getPrivateObjectUrl(finalObjectKey)
+        await getPrivateObjectUrl(finalObjectKey)
     });
   } catch (error) {
     console.error(
