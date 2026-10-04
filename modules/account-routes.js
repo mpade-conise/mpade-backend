@@ -1,4 +1,4 @@
-const registerAccountRoutes = ({ app, authenticateSupabaseUser, requireSupabaseAdmin }) => {
+const registerAccountRoutes = ({ app, authenticateSupabaseUser }) => {
 /* =========================================================
    ACCOUNT LIFECYCLE / SUPABASE ADMIN
 ========================================================= */
